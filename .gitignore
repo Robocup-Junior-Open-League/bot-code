@@ -208,3 +208,6 @@ __marimo__/
 
 # Robus core (is its own repo)
 robus_core/
+
+# Claude Code
+.claude/

@@ -1,18 +1,34 @@
 import numpy as np
 
-def simple_corners(points):
+def simple_corners(points, window=3):
 	"""
-    Takes the list of boundary points.
-    Returns a list of (x, y) coordinates where points are further away than their neighbors and close enough to them.
-    """
+	Takes the list of boundary points.
+	Returns a list of (x, y) coordinates that are local depth maxima over a
+	window of neighbours on each side, and whose average spatial distance to
+	those neighbours is below the proximity threshold.
+ 
+	window: number of neighbours to consider on each side (default 3).
+	"""
 	corners = []
-	i = 1
-	while i < len(points) -1:
-		d = (points[i][0]**2 + points[i][1]**2) ** 0.5
-		# Depth check
-		if d > (points[i - 1][0]**2 + points[i - 1][1]**2) ** 0.5 and d > (points[i + 1][0]**2 + points[i + 1][1]**2) ** 0.5:
-			# Distance check
-			if ((points[i][0] - points[i - 1][0])**2 + (points[i][1] - points[i - 1][1])**2) ** 0.5 < 0.1 and ((points[i][0] - points[i + 1][0])**2 + (points[i][1] - points[i + 1][1])**2) ** 0.5 < 0.1:
-				corners.append(points[i])
-		i += 1
+	n = len(points)
+	for i in range(window, n - window):
+		x, y = points[i]
+		d = (x**2 + y**2) ** 0.5
+ 
+		# Depth check: must be further than every neighbour in the window
+		if not all(
+			d > (points[i + j][0]**2 + points[i + j][1]**2) ** 0.5
+			for j in range(-window, window + 1) if j != 0
+		):
+			continue
+ 
+		# Proximity check: average spatial distance to all window neighbours
+		avg_dist = sum(
+			((x - points[i + j][0])**2 + (y - points[i + j][1])**2) ** 0.5
+			for j in range(-window, window + 1) if j != 0
+		) / (2 * window)
+		if avg_dist >= 0.1:
+			continue
+ 
+		corners.append(points[i])
 	return corners
