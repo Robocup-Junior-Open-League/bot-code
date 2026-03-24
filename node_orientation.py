@@ -4,16 +4,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "robus-core"))
 
 import time
 import math
-import board
-import busio
-import digitalio
-from adafruit_bno08x import (
-    BNO_REPORT_ACCELEROMETER,
-    BNO_REPORT_ROTATION_VECTOR,
-    PacketError,
-)
-from adafruit_bno08x.i2c import BNO08X_I2C
-from libs.lib_telemtrybroker import TelemetryBroker
+from robus_core.libs.lib_telemtrybroker import TelemetryBroker
+
+try:
+    import board
+    import busio
+    import digitalio
+    from adafruit_bno08x import (
+        BNO_REPORT_ACCELEROMETER,
+        BNO_REPORT_ROTATION_VECTOR,
+        PacketError,
+    )
+    from adafruit_bno08x.i2c import BNO08X_I2C
+except ImportError as e:
+    print(f"[IMU] Hardware libraries not available ({e}) — is this running on the robot? Exiting.")
+    sys.exit(0)
 
 # --- CONFIG ---
 I2C_ADDRESS  = 0x4b
