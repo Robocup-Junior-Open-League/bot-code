@@ -118,6 +118,24 @@ def _quat_to_matrix(i, j, k, w):
     ])
 
 
+def _quat_inv(q):
+    """Conjugate (= inverse for unit quaternions) of (i, j, k, w)."""
+    i, j, k, w = q
+    return (-i, -j, -k, w)
+
+
+def _quat_mul(q1, q2):
+    """Hamilton product q1 ⊗ q2, both as (i, j, k, w)."""
+    i1, j1, k1, w1 = q1
+    i2, j2, k2, w2 = q2
+    return (
+        w1*i2 + i1*w2 + j1*k2 - k1*j2,
+        w1*j2 - i1*k2 + j1*w2 + k1*i2,
+        w1*k2 + i1*j2 - j1*i2 + k1*w2,
+        w1*w2 - i1*i2 - j1*j2 - k1*k2,
+    )
+
+
 def _to_cal_frame(v_body, quat):
     """Rotate a body-frame vector (x, y, z) into the calibrated world frame."""
     v_world = _quat_to_matrix(*quat) @ np.array(v_body)
@@ -130,12 +148,12 @@ def _to_cal_frame(v_body, quat):
 #   Y = startup right (X × Z)
 #
 # _R_cal rows are the calibrated axes in world coords → v_cal = _R_cal @ v_world
-_R_cal       = None
-_startup_yaw = None   # degrees; yaw offset so that startup heading = 0°
+_R_cal      = None
+_q_startup  = None   # startup quaternion; used to compute relative orientation
 
 
 def setup_calibration(bno):
-    global _R_cal, _startup_yaw
+    global _R_cal, _q_startup
     print("[IMU] Calibrating axes — hold sensor still...")
     time.sleep(1.0)
 
@@ -150,10 +168,11 @@ def setup_calibration(bno):
     X_cal      = _normalize(sensor_fwd - np.dot(sensor_fwd, Z_cal) * Z_cal)  # forward, horizontal
     Y_cal      = _normalize(np.cross(X_cal, Z_cal))           # right
 
-    _R_cal = np.array([X_cal, Y_cal, Z_cal])
+    _R_cal     = np.array([X_cal, Y_cal, Z_cal])
+    _q_startup = q
 
-    _, _, _startup_yaw = quaternion_to_euler(*q)
-    print(f"[IMU] Calibration done. Startup yaw: {_startup_yaw:.1f}°")
+    roll, pitch, yaw = quaternion_to_euler(*q)
+    print(f"[IMU] Calibration done. Startup orientation: roll={roll:.1f}° pitch={pitch:.1f}° yaw={yaw:.1f}°")
     print(f"[IMU]   Z (up):      {Z_cal.round(3)}")
     print(f"[IMU]   X (forward): {X_cal.round(3)}")
     print(f"[IMU]   Y (right):   {Y_cal.round(3)}")
@@ -212,12 +231,13 @@ while True:
                 "k": round(k, 4), "w": round(w, 4),
             })
             if AUTOCALIBRATE:
-                # Roll and pitch are gravity-referenced — identical in cal frame.
-                # Yaw is offset so startup heading = 0°.
+                # q_rel = q_startup⁻¹ ⊗ q_current → identity at startup → (0, 0, 0) Euler
+                q_rel = _quat_mul(_quat_inv(_q_startup), quat)
+                cal_roll, cal_pitch, cal_yaw = quaternion_to_euler(*q_rel)
                 data["imu_orientation_cal"] = json.dumps({
-                    "roll":  round(roll,  2),
-                    "pitch": round(pitch, 2),
-                    "yaw":   round((yaw - _startup_yaw) % 360, 2),
+                    "roll":  round(cal_roll,  2),
+                    "pitch": round(cal_pitch, 2),
+                    "yaw":   round(cal_yaw,   2),
                 })
 
         # Linear acceleration (gravity removed)
