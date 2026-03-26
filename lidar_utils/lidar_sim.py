@@ -2,7 +2,8 @@ import math
 import random
 import time
 
-SIM_QUALITY = 15  # Simulated quality value passed to on_update
+SIM_QUALITY  = 15   # Simulated quality value passed to on_update
+SIM_JITTER_MM = 0   # Gaussian noise (std dev, mm) added to each distance reading
 
 def read_lidar_data(on_update, on_ready=None, width=1.0, length=2.0, step_size=1, proximity=0.1, robot_radius=0.1):
     """
@@ -19,7 +20,11 @@ def read_lidar_data(on_update, on_ready=None, width=1.0, length=2.0, step_size=1
     print(f"  Obstacles      : {[(round(ox, 3), round(oy, 3)) for ox, oy in obstacles]}")
     if on_ready:
         on_ready(px, py, angle_f)
-    scan = [(angle, int(dist_m * 1000)) for angle, dist_m in results if 0 < int(dist_m * 1000) < 12000]
+    scan = [
+        (angle, int(dist_m * 1000 + random.gauss(0, SIM_JITTER_MM)))
+        for angle, dist_m in results
+        if 150 <= int(dist_m * 1000) <= 12000
+    ]
     try:
         while True:
             for angle, distance_mm in scan:
