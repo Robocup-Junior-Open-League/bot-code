@@ -85,7 +85,7 @@ def _is_near_wall(center):
 # ── Physics-aware position prediction ────────────────────────────────────────
 
 _MAX_PRED_STEPS = 20
-_MAX_PRED_DT    = 2.0
+_MAX_PRED_DT    = 0.5   # one frame of lost → small dt; cap guards against startup/pause spikes
 
 
 def _predict_with_bounce(x, y, vx, vy, dt):
@@ -120,22 +120,14 @@ def _filter_overlapping(robots):
 # ── Velocity fitting ──────────────────────────────────────────────────────────
 
 def _fit_velocity(history):
-    n = len(history)
-    if n < 2:
+    if len(history) < 2:
         return 0.0, 0.0
-    t0     = history[0][0]
-    ts     = [h[0] - t0 for h in history]
-    xs     = [h[1]       for h in history]
-    ys     = [h[2]       for h in history]
-    sum_t  = sum(ts)
-    sum_t2 = sum(t * t for t in ts)
-    denom  = n * sum_t2 - sum_t ** 2
-    if abs(denom) < 1e-9:
+    arr = np.array(history, dtype=float)   # (N, 3): [t, x, y]
+    ts  = arr[:, 0] - arr[0, 0]
+    if ts[-1] < 1e-9:
         return 0.0, 0.0
-    sum_tx = sum(t * x for t, x in zip(ts, xs))
-    sum_ty = sum(t * y for t, y in zip(ts, ys))
-    vx = (n * sum_tx - sum_t * sum(xs)) / denom
-    vy = (n * sum_ty - sum_t * sum(ys)) / denom
+    vx = float(np.polyfit(ts, arr[:, 1], 1)[0])
+    vy = float(np.polyfit(ts, arr[:, 2], 1)[0])
     return vx, vy
 
 
@@ -154,28 +146,21 @@ def _match_and_track(detections, now):
     matched_det   = [None] * len(detections)
     matched_track = set()
 
-    pairs = sorted(
-        (math.hypot(det["x"] - px, det["y"] - py), di, tid)
-        for di, det in enumerate(detections)
-        for tid, (px, py) in predictions.items()
-    )
-    for _, di, tid in pairs:
-        if matched_det[di] is None and tid not in matched_track:
-            matched_det[di] = tid
-            matched_track.add(tid)
-
-    for di, det in enumerate(detections):
-        if matched_det[di] is not None:
-            continue
-        remaining = [(tid, px, py) for tid, (px, py) in predictions.items()
-                     if tid not in matched_track]
-        if remaining:
-            best_tid = min(remaining,
-                           key=lambda t: math.hypot(det["x"] - t[1], det["y"] - t[2]))[0]
-            matched_det[di] = best_tid
-            matched_track.add(best_tid)
-        elif len(_tracked) < MAX_ROBOTS:
-            pass
+    if detections and predictions:
+        pred_ids = list(predictions.keys())
+        det_xy   = np.array([[d["x"], d["y"]] for d in detections])  # (D, 2)
+        pred_xy  = np.array([predictions[tid] for tid in pred_ids])  # (T, 2)
+        dist_mat = np.hypot(det_xy[:, 0:1] - pred_xy[:, 0],
+                            det_xy[:, 1:2] - pred_xy[:, 1])          # (D, T)
+        pairs = sorted(
+            (dist_mat[di, ti], di, pred_ids[ti])
+            for di in range(len(detections))
+            for ti in range(len(pred_ids))
+        )
+        for _, di, tid in pairs:
+            if matched_det[di] is None and tid not in matched_track:
+                matched_det[di] = tid
+                matched_track.add(tid)
 
     new_tracked = {}
 
@@ -207,6 +192,8 @@ def _match_and_track(detections, now):
                 "lost": 0, "history": history,
             }
         else:
+            if len(new_tracked) >= MAX_ROBOTS:
+                continue   # at capacity — discard this detection
             tid = _next_id
             _next_id += 1
             new_tracked[tid] = {
@@ -224,10 +211,11 @@ def _match_and_track(detections, now):
     for tid, tr in _tracked.items():
         if tid in matched_track:
             continue
-        tr["lost"] += 1
-        new_tracked[tid] = tr
         dt = now - tr["t"]
         px, py = _predict_with_bounce(tr["x"], tr["y"], tr["vx"], tr["vy"], dt)
+        # Advance the stored state so next frame's dt is always one step,
+        # not growing from the original detection timestamp.
+        new_tracked[tid] = {**tr, "x": px, "y": py, "t": now, "lost": tr["lost"] + 1}
         result.append({
             "x": round(px, 3), "y": round(py, 3),
             "pts": 0, "method": "predicted",
