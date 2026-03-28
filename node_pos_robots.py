@@ -2,60 +2,36 @@ from robus_core.libs.lib_telemtrybroker import TelemetryBroker
 import json
 import math
 import time
+import numpy as np
 
 # ── Field & detection configuration ──────────────────────────────────────────
-FIELD_WIDTH      = 1.82    # metres, X axis
-FIELD_HEIGHT     = 2.43    # metres, Y axis
-ROBOT_RADIUS     = 0.09    # metres — assumed radius of all robots
+FIELD_WIDTH  = 1.82   # metres, X axis
+FIELD_HEIGHT = 2.43   # metres, Y axis
+ROBOT_RADIUS = 0.09   # metres — assumed radius of all robots
+ROBOT_DIAMETER = ROBOT_RADIUS * 2
 
-# A lidar hit is classified as a wall hit if it falls within this distance of
-# any field boundary.  Slightly smaller than ROBOT_RADIUS so that robots near
-# walls can still be detected.
-WALL_MARGIN      = 0.08   # metres
+# Cluster centres within this distance of any field boundary are rejected.
+WALL_MARGIN = 0.08   # metres
 
-# Two interior points belong to the same robot if they are within this distance.
-# Upper bound: at 1° resolution and 5 m range, adjacent hits on the same robot
-# are at most ~8.7 cm apart.  Keep well below the robot diameter (18 cm) so
-# that two separate robots with a small angular gap are not merged.
-CLUSTER_DIST     = 0.10   # metres
+# Max Cartesian gap between consecutive (angle-sorted) points in a cluster.
+CLUSTER_THRESHOLD = 0.08   # metres
 
 # Clusters smaller than this are discarded as noise.
-MIN_CLUSTER_SIZE = 2
+MIN_CLUSTER_POINTS = 3
 
-# Attempt circle fitting only for clusters at least this large.
-MIN_CIRCLE_PTS   = 3
-
-# Iterations of the centre-convergence loop.
-CIRCLE_FIT_ITERS = 8
-
-# If the RMS deviation from ROBOT_RADIUS exceeds this, fall back to centroid.
-MAX_FIT_ERROR    = 0.06   # metres
-
-# Maximum extent of a valid robot cluster along either field axis.
-# A robot of radius ROBOT_RADIUS subtends at most 2*ROBOT_RADIUS in any
-# direction.  Wall fragments that leak past WALL_MARGIN are typically much
-# longer in one axis, so this gate rejects them without affecting real robots.
-MAX_CLUSTER_EXTENT = ROBOT_RADIUS * 3   # metres  (≈ 27 cm)
+# Detected diameter may differ from ROBOT_DIAMETER by at most this much.
+SIZE_TOLERANCE = 0.05   # metres
 
 # ── Confidence & tracking ─────────────────────────────────────────────────────
-# After scoring all raw detections, keep only this many (highest confidence).
-MAX_ROBOTS       = 3
+MAX_ROBOTS      = 3
 
-# Two detections whose centres are closer than this are considered overlapping;
-# the less-confident one is discarded.
-OVERLAP_DIST     = ROBOT_RADIUS * 2   # metres
+# Two detections whose centres are closer than this are considered overlapping.
+OVERLAP_DIST    = ROBOT_RADIUS * 2   # metres
 
-# Minimum elapsed time between two detections before adding a history sample.
-VEL_MIN_DT       = 0.05   # seconds
-
-# Rolling history length for least-squares velocity fitting (per tracked robot).
-VEL_HISTORY_N    = 10
-
-# Minimum history samples required before the fitted velocity is trusted.
-VEL_HISTORY_MIN  = 3
-
-# Hard cap applied after fitting — guards against residual noise spikes.
-MAX_ROBOT_SPEED  = 2.0    # m/s
+VEL_MIN_DT      = 0.05   # seconds — min elapsed time between history samples
+VEL_HISTORY_N   = 10     # rolling history length per tracked robot
+VEL_HISTORY_MIN = 3      # minimum samples before fitted velocity is trusted
+MAX_ROBOT_SPEED = 2.0    # m/s — hard cap after fitting
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -63,146 +39,60 @@ mb = TelemetryBroker()
 
 _lidar     = {}   # {angle_deg (int): dist_mm (int)}
 _robot_pos = None # (x, y) metres, in field frame
-_imu_pitch = None # degrees — from imu_pitch broker key; None = not yet received
+_imu_pitch = None # degrees — from imu_pitch broker key
 
 # ── Tracking state ────────────────────────────────────────────────────────────
 _tracked = {}   # id → {"x","y","vx","vy","t","lost","history"}
-_next_id = 1    # monotonically increasing ID counter
+_next_id = 1
 
 
 def _heading():
     return _imu_pitch if _imu_pitch is not None else 0.0
 
 
-# ── Coordinate conversion ─────────────────────────────────────────────────────
+# ── Detection ─────────────────────────────────────────────────────────────────
 
-def _is_wall_hit(x, y):
-    """True if the point is close enough to a field boundary to be a wall hit."""
-    return (
-        x <= WALL_MARGIN or x >= FIELD_WIDTH  - WALL_MARGIN or
-        y <= WALL_MARGIN or y >= FIELD_HEIGHT - WALL_MARGIN
-    )
-
-
-def _inside_field(x, y):
-    return 0 <= x <= FIELD_WIDTH and 0 <= y <= FIELD_HEIGHT
+def _lidar_points(angles, distances, lidar_pos):
+    """Convert polar scan to absolute field-frame Cartesian numpy array."""
+    x = lidar_pos[0] + distances * np.cos(angles)
+    y = lidar_pos[1] + distances * np.sin(angles)
+    return np.column_stack((x, y))
 
 
-# ── Angular-continuity clustering ─────────────────────────────────────────────
-
-def _cluster_contiguous(sorted_scan):
+def _detect_clusters(points, threshold=CLUSTER_THRESHOLD):
     """
-    Cluster lidar points by angular continuity.
-
-    sorted_scan: [(angle_deg, x, y, is_interior), ...] sorted by sensor angle.
-
-    A cluster is broken whenever:
-      - a non-interior point (wall hit or out-of-field) is encountered, OR
-      - the Cartesian gap to the previous interior point exceeds CLUSTER_DIST.
-
-    Returns a list of [(x, y)] clusters.
+    Group angle-sorted Cartesian points into clusters by consecutive distance.
+    Returns a list of (N, 2) numpy arrays.
     """
+    if len(points) == 0:
+        return []
     clusters = []
-    current  = []
-
-    for _, x, y, is_interior in sorted_scan:
-        if not is_interior:
-            # Wall hit / out-of-field — end the current run
-            if current:
-                clusters.append(current)
-                current = []
+    current  = [points[0]]
+    for i in range(1, len(points)):
+        if np.linalg.norm(points[i] - points[i - 1]) < threshold:
+            current.append(points[i])
         else:
-            if current:
-                lx, ly = current[-1]
-                if math.hypot(x - lx, y - ly) > CLUSTER_DIST:
-                    # Spatial gap too large — start a fresh cluster
-                    clusters.append(current)
-                    current = []
-            current.append((x, y))
-
-    if current:
-        clusters.append(current)
-
+            clusters.append(np.array(current))
+            current = [points[i]]
+    clusters.append(np.array(current))
     return clusters
 
 
-# ── Circle fitting ────────────────────────────────────────────────────────────
-
-def _fit_center(pts, rx=0.0, ry=0.0):
-    """
-    Estimate the centre of the robot given a cluster of lidar hit points.
-
-    For clusters of MIN_CIRCLE_PTS or more:
-      Iterative convergence — each point P estimates the centre as
-          C_i = P - R * normalise(P - O_prev)
-      The new estimate is the mean of all C_i.  Converges to the
-      least-squares circle centre for a circle of known radius ROBOT_RADIUS.
-      Falls back to centroid if the RMS fit error exceeds MAX_FIT_ERROR.
-
-    For smaller clusters: centroid of the points.
-
-    rx, ry: position of the observing robot (used to seed a better initial
-    estimate — the centroid of a near-side arc sits on the robot surface,
-    so pushing it outward by ROBOT_RADIUS gives a near-correct starting point
-    and avoids the dist≈0 degenerate case).
-
-    Returns (x, y, method_str).
-    """
-    n = len(pts)
-    cx = sum(p[0] for p in pts) / n
-    cy = sum(p[1] for p in pts) / n
-
-    if n < MIN_CIRCLE_PTS:
-        return cx, cy, "centroid"
-
-    # Seed: move the arc centroid away from the observing robot by ROBOT_RADIUS.
-    # For a narrow arc this lands near the true circle centre; for a wide arc
-    # it is much closer to the true centre than the raw centroid.
-    ddx, ddy = cx - rx, cy - ry
-    dd = math.hypot(ddx, ddy)
-    if dd > 1e-9:
-        ox = cx + (ddx / dd) * ROBOT_RADIUS
-        oy = cy + (ddy / dd) * ROBOT_RADIUS
-    else:
-        ox, oy = cx, cy
-
-    # Iterative circle-centre convergence
-    for _ in range(CIRCLE_FIT_ITERS):
-        sx, sy = 0.0, 0.0
-        for px, py in pts:
-            dx, dy = px - ox, py - oy
-            dist = math.hypot(dx, dy)
-            if dist < 1e-9:
-                sx += px
-                sy += py
-            else:
-                scale = ROBOT_RADIUS / dist
-                sx += px - dx * scale   # = P - R * normalise(P - O)
-                sy += py - dy * scale
-        ox, oy = sx / n, sy / n
-
-    # Validate: RMS of |P - O| - R should be small
-    rms = math.sqrt(
-        sum((math.hypot(px - ox, py - oy) - ROBOT_RADIUS) ** 2 for px, py in pts) / n
+def _is_near_wall(center):
+    x, y = center
+    return (
+        x < WALL_MARGIN or x > FIELD_WIDTH  - WALL_MARGIN or
+        y < WALL_MARGIN or y > FIELD_HEIGHT - WALL_MARGIN
     )
-    if rms > MAX_FIT_ERROR:
-        return cx, cy, f"centroid (fit rms={rms:.3f})"
-
-    return ox, oy, f"circle (rms={rms:.3f})"
 
 
 # ── Physics-aware position prediction ────────────────────────────────────────
 
-_MAX_PRED_STEPS = 20   # hard cap — prevents O(dt) blow-up for long-lost robots
-_MAX_PRED_DT    = 2.0  # seconds — prediction accuracy degrades beyond this anyway
+_MAX_PRED_STEPS = 20
+_MAX_PRED_DT    = 2.0
 
 
 def _predict_with_bounce(x, y, vx, vy, dt):
-    """
-    Extrapolate (x, y) forward by at most _MAX_PRED_DT seconds, using at most
-    _MAX_PRED_STEPS sub-steps with wall reflection.  Both caps are O(1) so
-    the cost is constant regardless of how long a robot has been undetected.
-    """
     dt   = min(dt, _MAX_PRED_DT)
     n    = max(1, min(int(dt / 0.02) + 1, _MAX_PRED_STEPS))
     step = dt / n
@@ -223,10 +113,6 @@ def _predict_with_bounce(x, y, vx, vy, dt):
 # ── Overlap filtering ─────────────────────────────────────────────────────────
 
 def _filter_overlapping(robots):
-    """
-    Given robots sorted by confidence (descending), always discard any robot
-    whose centre falls within OVERLAP_DIST of a higher-confidence robot already kept.
-    """
     kept = []
     for r in robots:
         if not any(math.hypot(r["x"] - k["x"], r["y"] - k["y"]) < OVERLAP_DIST
@@ -235,54 +121,21 @@ def _filter_overlapping(robots):
     return kept
 
 
-# ── Confidence scoring ────────────────────────────────────────────────────────
-
-def _confidence_score(pts_count, method):
-    """
-    Return a scalar confidence for one detection.
-
-    Circle fit with low RMS → high score.
-    Centroid fallback (bad fit) → moderate penalty.
-    Centroid (too few points for fitting) → larger penalty.
-    """
-    if method.startswith("circle"):
-        try:
-            rms = float(method.split("rms=")[1].rstrip(")"))
-        except Exception:
-            rms = MAX_FIT_ERROR / 2
-        quality = 1.0 - min(rms, MAX_FIT_ERROR) / MAX_FIT_ERROR
-        return round(pts_count * quality, 3)
-    elif "fit rms=" in method:           # centroid because circle fit was poor
-        return round(pts_count * 0.2, 3)
-    else:                                # centroid because cluster was too small
-        return round(pts_count * 0.4, 3)
-
-
-# ── Velocity fitting ─────────────────────────────────────────────────────────
+# ── Velocity fitting ──────────────────────────────────────────────────────────
 
 def _fit_velocity(history):
-    """
-    Ordinary least-squares linear fit over a history of (t, rx, ry) tuples
-    where rx/ry are positions relative to the main robot.
-
-    Returns (vx_rel, vy_rel) in m/s.  Each axis is solved independently:
-        pos = v * t + b   →   v = (n·Σtx − Σt·Σx) / (n·Σt² − (Σt)²)
-    """
     n = len(history)
     if n < 2:
         return 0.0, 0.0
-
     t0     = history[0][0]
     ts     = [h[0] - t0 for h in history]
     xs     = [h[1]       for h in history]
     ys     = [h[2]       for h in history]
-
     sum_t  = sum(ts)
     sum_t2 = sum(t * t for t in ts)
     denom  = n * sum_t2 - sum_t ** 2
     if abs(denom) < 1e-9:
         return 0.0, 0.0
-
     sum_tx = sum(t * x for t, x in zip(ts, xs))
     sum_ty = sum(t * y for t, y in zip(ts, ys))
     vx = (n * sum_tx - sum_t * sum(xs)) / denom
@@ -293,30 +146,15 @@ def _fit_velocity(history):
 # ── ID tracking ───────────────────────────────────────────────────────────────
 
 def _match_and_track(detections, now):
-    """
-    Assign persistent IDs to `detections` and fill in predicted positions for
-    any tracked robots that were not detected this frame.
-
-    Matching uses the globally best-fit pairs (greedy by distance, no cutoff).
-    Unmatched tracked robots within MAX_LOST_FRAMES are appended to the result
-    at their velocity-extrapolated position with method="predicted".
-
-    detections: [{"x","y","pts","method","confidence"}, ...]  (already filtered)
-    now:        current monotonic timestamp (seconds)
-
-    Returns the combined list (matched detections + predicted ghosts).
-    """
     global _tracked, _next_id
 
-    # ── Predict current positions for every tracked robot ─────────────────────
-    predictions = {}          # tid → (px, py)
+    predictions = {}
     for tid, tr in _tracked.items():
         dt = now - tr["t"]
         predictions[tid] = _predict_with_bounce(
             tr["x"], tr["y"], tr["vx"], tr["vy"], dt,
         )
 
-    # ── Greedy best-fit matching — no distance cutoff ──────────────────────────
     matched_det   = [None] * len(detections)
     matched_track = set()
 
@@ -330,9 +168,6 @@ def _match_and_track(detections, now):
             matched_det[di] = tid
             matched_track.add(tid)
 
-    # ── Force-assign remaining detections to nearest unmatched tracked robot ──
-    # New IDs are only minted when tracked robots are exhausted and we are still
-    # below MAX_ROBOTS (i.e. not all robots have been seen for the first time).
     for di, det in enumerate(detections):
         if matched_det[di] is not None:
             continue
@@ -344,9 +179,8 @@ def _match_and_track(detections, now):
             matched_det[di] = best_tid
             matched_track.add(best_tid)
         elif len(_tracked) < MAX_ROBOTS:
-            pass   # genuinely new robot — will receive a fresh ID below
+            pass
 
-    # ── Update / create tracked entries for each detection ────────────────────
     new_tracked = {}
 
     for di, det in enumerate(detections):
@@ -358,8 +192,6 @@ def _match_and_track(detections, now):
             history = old.get("history", [])
 
             if dt >= VEL_MIN_DT:
-                # History stores absolute field-frame positions; main-robot
-                # drift is neutralised upstream by the EMA filter on _robot_pos.
                 history = history + [(now, det["x"], det["y"])]
                 history = history[-VEL_HISTORY_N:]
 
@@ -368,7 +200,6 @@ def _match_and_track(detections, now):
             else:
                 new_vx, new_vy = old["vx"], old["vy"]
 
-            # Clamp to maximum plausible speed
             spd = math.hypot(new_vx, new_vy)
             if spd > MAX_ROBOT_SPEED:
                 new_vx *= MAX_ROBOT_SPEED / spd
@@ -380,7 +211,6 @@ def _match_and_track(detections, now):
                 "lost": 0, "history": history,
             }
         else:
-            # Only reached when tracked is empty or below MAX_ROBOTS
             tid = _next_id
             _next_id += 1
             new_tracked[tid] = {
@@ -389,21 +219,17 @@ def _match_and_track(detections, now):
                 "lost": 0, "history": [(now, det["x"], det["y"])],
             }
 
-        det["id"] = tid
-        det["vx"] = round(new_tracked[tid]["vx"], 3)
-        det["vy"] = round(new_tracked[tid]["vy"], 3)
+        det["id"]  = tid
+        det["vx"]  = round(new_tracked[tid]["vx"], 3)
+        det["vy"]  = round(new_tracked[tid]["vy"], 3)
 
     result = list(detections)
 
-    # ── Carry forward unmatched tracked robots ────────────────────────────────
-    # Tracked entries are NEVER dropped so IDs survive long absences.
-    # _predict_with_bounce is O(1) (capped steps) so this is safe even for
-    # robots that have been undetected for a long time.
     for tid, tr in _tracked.items():
         if tid in matched_track:
             continue
         tr["lost"] += 1
-        new_tracked[tid] = tr              # always keep the entry
+        new_tracked[tid] = tr
         dt = now - tr["t"]
         px, py = _predict_with_bounce(tr["x"], tr["y"], tr["vx"], tr["vy"], dt)
         result.append({
@@ -422,13 +248,6 @@ def _match_and_track(detections, now):
 # ── Main detection ────────────────────────────────────────────────────────────
 
 def _detect_robots():
-    """
-    Returns (robots, origin) where origin is the coordinate-frame snapshot
-    used for this detection cycle — embedded in the published payload so the
-    vis can apply the identical transform to the raw lidar, eliminating the
-    inter-process race that otherwise causes detected circles to appear shifted
-    relative to the displayed scatter.
-    """
     if not _lidar or _robot_pos is None:
         return [], None
 
@@ -436,45 +255,46 @@ def _detect_robots():
     rx, ry = _robot_pos
     fa_rad = math.radians(_heading())
 
-    # Build angularly-sorted scan with field coordinates and interior flag
-    sorted_scan = []
-    for angle_deg in sorted(_lidar):
-        dist_mm = _lidar[angle_deg]
-        d = dist_mm / 1000.0
-        a = math.radians(angle_deg) + fa_rad
-        x = rx + d * math.cos(a)
-        y = ry + d * math.sin(a)
-        interior = _inside_field(x, y) and not _is_wall_hit(x, y)
-        sorted_scan.append((angle_deg, x, y, interior))
+    # Build angle-sorted absolute field-frame point array
+    sorted_angles = sorted(_lidar.keys())
+    angles    = np.array([math.radians(a) + fa_rad for a in sorted_angles])
+    distances = np.array([_lidar[a] / 1000.0       for a in sorted_angles])
+    pts       = _lidar_points(angles, distances, (rx, ry))
 
-    clusters = [
-        c for c in _cluster_contiguous(sorted_scan)
-        if len(c) >= MIN_CLUSTER_SIZE
-    ]
+    clusters = _detect_clusters(pts)
 
-    # ── Fit, score, sort, filter overlaps, keep top MAX_ROBOTS ───────────────
     robots = []
     for cluster in clusters:
-        # Physical size gate: reject clusters whose bounding box along either
-        # field axis is larger than a robot could produce.  Wall fragments that
-        # leak past WALL_MARGIN are typically elongated along one axis and are
-        # caught here before any fitting or scoring is attempted.
-        xs = [p[0] for p in cluster]
-        ys = [p[1] for p in cluster]
-        if max(xs) - min(xs) > MAX_CLUSTER_EXTENT or \
-           max(ys) - min(ys) > MAX_CLUSTER_EXTENT:
+        if len(cluster) < MIN_CLUSTER_POINTS:
             continue
 
-        ox, oy, method = _fit_center(cluster, rx, ry)
-        confidence = _confidence_score(len(cluster), method)
-        robots.append({"x": round(ox, 3), "y": round(oy, 3),
-                       "pts": len(cluster), "method": method,
-                       "confidence": confidence})
+        center = np.mean(cluster, axis=0)
+
+        # Arc centroid sits on the near surface; push outward by one radius
+        # along the vector from the observing robot to get the true centre.
+        direction = center - np.array([rx, ry])
+        d = np.linalg.norm(direction)
+        if d > 1e-9:
+            center = center + (direction / d) * ROBOT_RADIUS
+
+        if _is_near_wall(center):
+            continue
+
+        dists = np.linalg.norm(cluster - center, axis=1)
+        
+        # Standard deviation of distances should be small for a perfect circle, big for line-like features
+        if np.std(dists) > 0.03:
+            continue
+
+        cx, cy = float(center[0]), float(center[1])
+        robots.append({
+            "x": round(cx, 3), "y": round(cy, 3),
+            "pts": len(cluster), "method": "cluster",
+            "confidence": float(len(cluster)),
+        })
 
     robots.sort(key=lambda r: r["confidence"], reverse=True)
     robots = _filter_overlapping(robots)[:MAX_ROBOTS]
-
-    # ── Assign / update persistent IDs (returns detections + predicted ghosts) ─
     robots = _match_and_track(robots, now)
 
     for r in robots:
@@ -483,10 +303,7 @@ def _detect_robots():
               f"  conf={r['confidence']:.2f}  [{r['method']}]"
               f"  v=({r['vx']:.2f}, {r['vy']:.2f})")
 
-    # Only the position is included — heading (sim_heading) is published
-    # per-scan and is always current in both processes; bundling a potentially
-    # stale heading here would cause spurious rotation errors in the vis.
-    origin = {"x": round(rx, 4), "y": round(ry, 4)}
+    origin = {"x": round(rx, 4), "y": round(ry, 4), "heading": round(math.degrees(fa_rad), 3)}
     return robots, origin
 
 
@@ -518,11 +335,8 @@ def on_update(key, value):
         except (ValueError, TypeError):
             return
 
-    # Only re-detect on new lidar data; position/angle updates just refresh state.
     if key == "lidar":
         robots, origin = _detect_robots()
-        # Bundle origin with robots so the vis can use the same coordinate
-        # snapshot without a second broker write (avoids I/O contention).
         mb.set("other_robots", json.dumps({"origin": origin, "robots": robots}))
 
 

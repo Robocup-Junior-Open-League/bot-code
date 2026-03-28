@@ -16,7 +16,8 @@ mb = TelemetryBroker()
 
 # ── Broker state ──────────────────────────────────────────────────────────────
 _lidar            = {}    # {angle_deg (int): dist_mm (int)}  — sensor frame
-_detection_origin = None  # (rx, ry) position snapshot from the last detection cycle
+_detection_origin  = None  # (rx, ry) position snapshot from the last detection cycle
+_detection_heading = None  # heading (degrees) snapshot from the last detection cycle
 _imu_pitch        = None  # degrees — from imu_pitch broker key; None = not yet received
 _robot_pos        = None  # (x, y) metres, field frame
 _other_robots     = []    # [[x, y, method, id], ...]  field frame
@@ -69,10 +70,12 @@ def _redraw():
         # Heading (fa_rad) comes from sim_heading published per-scan — always
         # current and consistent across processes, so use the vis's own value.
         # Position origin uses the detection snapshot to match the circles.
-        lidar_origin = (_detection_origin[0], _detection_origin[1]) \
-                       if _detection_origin is not None else origin
+        lidar_origin  = (_detection_origin[0], _detection_origin[1]) \
+                        if _detection_origin  is not None else origin
+        lidar_fa_rad  = math.radians(_detection_heading) \
+                        if _detection_heading is not None else fa_rad
         pts = np.array([
-            _lidar_to_field(a, d, fa_rad, lidar_origin)
+            _lidar_to_field(a, d, lidar_fa_rad, lidar_origin)
             for a, d in _lidar.items()
         ])
         ax.scatter(pts[:, 0], pts[:, 1],
@@ -245,7 +248,7 @@ def _redraw():
 
 # ── Broker callbacks ──────────────────────────────────────────────────────────
 def on_update(key, value):
-    global _lidar, _detection_origin, _imu_pitch
+    global _lidar, _detection_origin, _detection_heading, _imu_pitch
     global _robot_pos, _other_robots, _corners, _wall_corners, _wall_corners_hist
     global _walls, _walls_hist, _positioning_corner
     global _position_history, _other_robots_history
@@ -273,9 +276,9 @@ def on_update(key, value):
                 if isinstance(payload, dict):
                     orig = payload.get("origin")
                     if orig:
-                        # Only position — heading is consistent across processes
-                        # (sim_heading is published per-scan before lidar).
-                        _detection_origin = (float(orig["x"]), float(orig["y"]))
+                        _detection_origin  = (float(orig["x"]), float(orig["y"]))
+                        if "heading" in orig:
+                            _detection_heading = float(orig["heading"])
                     robot_list = payload.get("robots", [])
                 else:
                     robot_list = payload
