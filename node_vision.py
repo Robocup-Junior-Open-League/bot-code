@@ -25,6 +25,8 @@ BALL_RADIUS_MM = 21.0  # Real-world ball radius in mm (used for distance calc)
 # ── Broker key ────────────────────────────────────────────────────────────────
 BROKER_KEY = "ball"
 
+SIM_REPLACE = False  # Set True to force simulated ball even if a camera is found
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 mb    = TelemetryBroker()
@@ -187,19 +189,24 @@ if __name__ == "__main__":
 
     print("[VISION] Starting headless vision system...")
 
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  RES_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_HEIGHT)
-
-    if cap.isOpened():
-        print(f"[VISION] Camera opened ({RES_WIDTH}x{RES_HEIGHT}). "
-              "Running detection loop (Ctrl+C to stop)...")
-        sim = None
-    else:
-        cap.release()
+    if SIM_REPLACE:
         cap = None
         sim = _SimBall()
-        print("[VISION] Camera not available — falling back to simulated ball.")
+        print("[VISION] SIM_REPLACE=True — using simulated ball.")
+    else:
+        cap = cv2.VideoCapture(0)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  RES_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_HEIGHT)
+
+        if cap.isOpened():
+            print(f"[VISION] Camera opened ({RES_WIDTH}x{RES_HEIGHT}). "
+                  "Running detection loop (Ctrl+C to stop)...")
+            sim = None
+        else:
+            cap.release()
+            cap = None
+            sim = _SimBall()
+            print("[VISION] Camera not available — falling back to simulated ball.")
 
     last_log_time = time.time()
 
