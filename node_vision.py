@@ -498,17 +498,35 @@ if __name__ == "__main__":
 
                 result["global_pos"] = gpos
 
-                # ── Velocity tracking ────────────────────────────────────────
+                # ── Velocity tracking + hidden-position extrapolation ─────────
                 hidden_pos = None
+                pub_vx, pub_vy = _last_ball_vx, _last_ball_vy
 
                 if gpos is not None:
                     _last_detection_t = now_t
                     _last_ball_x = gpos["x"]
                     _last_ball_y = gpos["y"]
+
+                    # Keep hidden state in sync with the real detection so the
+                    # transition to hidden mode is seamless (no initial jump).
+                    _hidden_state   = [gpos["x"], gpos["y"],
+                                       _last_ball_vx, _last_ball_vy]
+                    _hidden_state_t = now_t
+
+                    # Validate sample before adding: reject if movement implies
+                    # speed above MAX_BALL_SPEED × 1.5 (outlier / noise spike).
                     if now_t - _vel_last_t >= BALL_VEL_MIN_DT:
-                        _vel_history.append([now_t, gpos["x"], gpos["y"]])
-                        if len(_vel_history) > BALL_VEL_HISTORY_N:
-                            _vel_history.pop(0)
+                        ok = True
+                        if _vel_history:
+                            dt_s = now_t - _vel_history[-1][0]
+                            if math.hypot(gpos["x"] - _vel_history[-1][1],
+                                          gpos["y"] - _vel_history[-1][2]
+                                          ) > MAX_BALL_SPEED * dt_s * 1.5:
+                                ok = False
+                        if ok:
+                            _vel_history.append([now_t, gpos["x"], gpos["y"]])
+                            if len(_vel_history) > BALL_VEL_HISTORY_N:
+                                _vel_history.pop(0)
                         _vel_last_t = now_t
                 else:
                     # Clear stale velocity history after ball has been absent for 1 s
@@ -524,22 +542,13 @@ if __name__ == "__main__":
                         vy_fit *= MAX_BALL_SPEED / spd
                     _last_ball_vx = vx_fit
                     _last_ball_vy = vy_fit
+                    # Propagate updated velocity into hidden state while visible
+                    if _hidden_state is not None:
+                        _hidden_state[2] = vx_fit
+                        _hidden_state[3] = vy_fit
 
-                # ── Hidden-position extrapolation (incremental) ───────────────
-                # Advance the hidden state one frame at a time so robot
-                # positions are always current and post-bounce velocity is live.
-                pub_vx, pub_vy = _last_ball_vx, _last_ball_vy
-
-                if gpos is not None:
-                    # Ball just became visible — discard hidden state
-                    _hidden_state   = None
-                    _hidden_state_t = -999.0
-                elif _last_ball_x is not None:
-                    if _hidden_state is None:
-                        # Initialise hidden state from last detected position
-                        _hidden_state   = [_last_ball_x, _last_ball_y,
-                                           _last_ball_vx, _last_ball_vy]
-                        _hidden_state_t = _last_detection_t
+                # ── Advance hidden physics when ball is not detected ──────────
+                if gpos is None and _hidden_state is not None:
                     dt_frame = now_t - _hidden_state_t
                     if dt_frame > 0:
                         hx, hy, hvx, hvy = _extrapolate_ball(
