@@ -66,8 +66,8 @@ _last_ball_vy = 0.0
 # Incremental hidden-physics state — advanced one frame at a time so that
 # (a) robot positions used are always current and (b) velocity reflects
 # the direction after each bounce.
-_hidden_state   = None    # [x, y, vx, vy] or None
-_hidden_state_t = -999.0  # monotonic time of last hidden-state update
+_hidden_state   = None   # [x, y, vx, vy] or None
+_hidden_state_t = None   # None = loaded from visible but not yet advanced
 
 _hw_available = False
 try:
@@ -507,11 +507,12 @@ if __name__ == "__main__":
                     _last_ball_x = gpos["x"]
                     _last_ball_y = gpos["y"]
 
-                    # Keep hidden state in sync with the real detection so the
-                    # transition to hidden mode is seamless (no initial jump).
+                    # Keep hidden state in sync with the real detection.
+                    # _hidden_state_t = None signals "not yet advanced" so the
+                    # ghost circle appears exactly at the last seen position.
                     _hidden_state   = [gpos["x"], gpos["y"],
                                        _last_ball_vx, _last_ball_vy]
-                    _hidden_state_t = now_t
+                    _hidden_state_t = None
 
                     # Validate sample before adding: reject if movement implies
                     # speed above MAX_BALL_SPEED × 1.5 (outlier / noise spike).
@@ -549,16 +550,21 @@ if __name__ == "__main__":
 
                 # ── Advance hidden physics when ball is not detected ──────────
                 if gpos is None and _hidden_state is not None:
-                    dt_frame = now_t - _hidden_state_t
-                    if dt_frame > 0:
-                        hx, hy, hvx, hvy = _extrapolate_ball(
-                            _hidden_state[0], _hidden_state[1],
-                            _hidden_state[2], _hidden_state[3],
-                            dt_frame,
-                            robots=_all_robot_positions(),
-                        )
-                        _hidden_state   = [hx, hy, hvx, hvy]
+                    if _hidden_state_t is None:
+                        # First hidden frame: publish at exact last-seen position,
+                        # no advancement yet.
                         _hidden_state_t = now_t
+                    else:
+                        dt_frame = now_t - _hidden_state_t
+                        if dt_frame > 0:
+                            hx, hy, hvx, hvy = _extrapolate_ball(
+                                _hidden_state[0], _hidden_state[1],
+                                _hidden_state[2], _hidden_state[3],
+                                dt_frame,
+                                robots=_all_robot_positions(),
+                            )
+                            _hidden_state   = [hx, hy, hvx, hvy]
+                            _hidden_state_t = now_t
                     hidden_pos = {"x": round(_hidden_state[0], 3),
                                   "y": round(_hidden_state[1], 3)}
                     pub_vx = _hidden_state[2]
