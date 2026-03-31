@@ -382,6 +382,27 @@ def _all_robot_positions():
     return []
 
 
+def _in_camera_fov(bx, by):
+    """
+    Return True if the global position (bx, by) falls within the camera's
+    current horizontal FOV.  Returns False if robot position/heading unknown.
+    """
+    if _robot_pos is None or _imu_pitch is None:
+        return False
+    heading_rad = math.radians(_imu_pitch)
+    cam_x = _robot_pos[0] + ROBOT_RADIUS * math.cos(heading_rad)
+    cam_y = _robot_pos[1] + ROBOT_RADIUS * math.sin(heading_rad)
+    dx, dy  = bx - cam_x, by - cam_y
+    cos_h   = math.cos(heading_rad)
+    sin_h   = math.sin(heading_rad)
+    local_z =  dx * cos_h + dy * sin_h   # depth  (forward)
+    local_x = -dx * sin_h + dy * cos_h   # lateral
+    if local_z <= 0:
+        return False
+    angle = math.degrees(math.atan2(abs(local_x), local_z))
+    return angle <= FOV_DEG / 2.0
+
+
 def _on_broker_update(key, value):
     global _robot_pos, _imu_pitch, _sim_state
     if value is None:
@@ -549,34 +570,43 @@ if __name__ == "__main__":
                         _hidden_state[3] = vy_fit
 
                 # ── Advance hidden physics when ball is not detected ──────────
+                ball_lost = False
                 if gpos is None and _hidden_state is not None:
-                    if _hidden_state_t is None:
-                        # First hidden frame: publish at exact last-seen position,
-                        # no advancement yet.
-                        _hidden_state_t = now_t
+                    if _in_camera_fov(_hidden_state[0], _hidden_state[1]):
+                        # Prediction is inside the FOV but no ball detected —
+                        # the ball is lost.  Freeze the hidden state in place.
+                        ball_lost = True
+                        pub_vx = pub_vy = 0.0
                     else:
-                        dt_frame = now_t - _hidden_state_t
-                        if dt_frame > 0:
-                            hx, hy, hvx, hvy = _extrapolate_ball(
-                                _hidden_state[0], _hidden_state[1],
-                                _hidden_state[2], _hidden_state[3],
-                                dt_frame,
-                                robots=_all_robot_positions(),
-                            )
-                            _hidden_state   = [hx, hy, hvx, hvy]
+                        if _hidden_state_t is None:
+                            # First hidden frame: publish at exact last-seen
+                            # position, no advancement yet.
                             _hidden_state_t = now_t
+                        else:
+                            dt_frame = now_t - _hidden_state_t
+                            if dt_frame > 0:
+                                hx, hy, hvx, hvy = _extrapolate_ball(
+                                    _hidden_state[0], _hidden_state[1],
+                                    _hidden_state[2], _hidden_state[3],
+                                    dt_frame,
+                                    robots=_all_robot_positions(),
+                                )
+                                _hidden_state   = [hx, hy, hvx, hvy]
+                                _hidden_state_t = now_t
+                        pub_vx = _hidden_state[2]
+                        pub_vy = _hidden_state[3]
                     hidden_pos = {"x": round(_hidden_state[0], 3),
                                   "y": round(_hidden_state[1], 3)}
-                    pub_vx = _hidden_state[2]
-                    pub_vy = _hidden_state[3]
 
-                result["vx"]         = round(pub_vx, 3)
-                result["vy"]         = round(pub_vy, 3)
+                result["vx"]        = round(pub_vx, 3)
+                result["vy"]        = round(pub_vy, 3)
                 result["hidden_pos"] = hidden_pos
+                result["ball_lost"]  = ball_lost
 
                 if sim is not None:
                     result["sim_pos"] = sim.pos
                 mb.set(BROKER_KEY, json.dumps(result))
+                mb.set("ball_lost",  json.dumps(ball_lost))
 
             # Log to console at most once per second
             now = time.time()
