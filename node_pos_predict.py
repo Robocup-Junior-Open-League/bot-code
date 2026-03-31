@@ -10,13 +10,7 @@ FIELD_WIDTH  = 1.82   # metres
 FIELD_HEIGHT = 2.43
 ROBOT_RADIUS = 0.09
 
-# ── Robot tracking ────────────────────────────────────────────────────────────
-MAX_ROBOTS      = 3
-VEL_MIN_DT      = 0.05   # seconds — min elapsed time between history samples
-VEL_HISTORY_N   = 10     # rolling history length per tracked robot
-VEL_HISTORY_MIN = 3      # minimum samples before fitted velocity is trusted
-MAX_ROBOT_SPEED = 2.0    # m/s — hard cap after fitting
-
+# ── Robot dead-reckoning ──────────────────────────────────────────────────────
 _MAX_PRED_STEPS = 20
 _MAX_PRED_DT    = 0.5
 
@@ -38,12 +32,12 @@ _robot_pos = None   # (x, y) metres
 _imu_pitch = None   # degrees
 _sim_state = None   # {"robot": [x,y], "obstacles": [[x,y],...]}
 
-# ── Robot tracking state ──────────────────────────────────────────────────────
-_tracked  = {}   # id → {"x","y","vx","vy","t","lost","history"}
-_next_id  = 1
+# ── Robot dead-reckoning state ────────────────────────────────────────────────
+# Cache of last known state per tracked robot ID, populated from other_robots_detected.
+_robot_last = {}   # id → {"x", "y", "vx", "vy", "t"}
 
 # ── Ball prediction state ─────────────────────────────────────────────────────
-_vel_history      = []       # [[t, x, y], ...]
+_vel_history      = []
 _vel_last_t       = -999.0
 _last_detection_t = -999.0
 _last_ball_vx     = 0.0
@@ -53,7 +47,7 @@ _hidden_state_t   = None     # None = loaded from visible, not yet advanced
 _ball_lost        = False    # latching: set in FOV with no detection, cleared on re-detection
 
 
-# ── Robot prediction functions ────────────────────────────────────────────────
+# ── Robot dead-reckoning ──────────────────────────────────────────────────────
 
 def _predict_with_bounce(x, y, vx, vy, dt):
     dt   = min(dt, _MAX_PRED_DT)
@@ -61,91 +55,11 @@ def _predict_with_bounce(x, y, vx, vy, dt):
     step = dt / n
     for _ in range(n):
         x += vx * step;  y += vy * step
-        if   x < ROBOT_RADIUS:                x = ROBOT_RADIUS;                vx =  abs(vx)
-        elif x > FIELD_WIDTH  - ROBOT_RADIUS:  x = FIELD_WIDTH  - ROBOT_RADIUS; vx = -abs(vx)
-        if   y < ROBOT_RADIUS:                y = ROBOT_RADIUS;                vy =  abs(vy)
-        elif y > FIELD_HEIGHT - ROBOT_RADIUS:  y = FIELD_HEIGHT - ROBOT_RADIUS; vy = -abs(vy)
+        if   x < ROBOT_RADIUS:               x = ROBOT_RADIUS;               vx =  abs(vx)
+        elif x > FIELD_WIDTH - ROBOT_RADIUS:  x = FIELD_WIDTH - ROBOT_RADIUS; vx = -abs(vx)
+        if   y < ROBOT_RADIUS:               y = ROBOT_RADIUS;               vy =  abs(vy)
+        elif y > FIELD_HEIGHT - ROBOT_RADIUS: y = FIELD_HEIGHT - ROBOT_RADIUS; vy = -abs(vy)
     return x, y
-
-
-def _fit_velocity(history):
-    if len(history) < 2:
-        return 0.0, 0.0
-    arr = np.array(history, dtype=float)
-    ts  = arr[:, 0] - arr[0, 0]
-    if ts[-1] < 1e-9:
-        return 0.0, 0.0
-    coeffs = np.polyfit(ts, arr[:, 1:3], 1)
-    return float(coeffs[0, 0]), float(coeffs[0, 1])
-
-
-def _match_and_track(detections, now):
-    global _tracked, _next_id
-
-    predictions = {
-        tid: _predict_with_bounce(tr["x"], tr["y"], tr["vx"], tr["vy"], now - tr["t"])
-        for tid, tr in _tracked.items()
-    }
-
-    matched_det   = [None] * len(detections)
-    matched_track = set()
-
-    if detections and predictions:
-        pred_ids = list(predictions.keys())
-        det_xy   = np.array([[d["x"], d["y"]] for d in detections])
-        pred_xy  = np.array([predictions[tid] for tid in pred_ids])
-        dist_mat = np.hypot(det_xy[:, 0:1] - pred_xy[:, 0],
-                            det_xy[:, 1:2] - pred_xy[:, 1])
-        for _, di, tid in sorted(
-            (dist_mat[di, ti], di, pred_ids[ti])
-            for di in range(len(detections))
-            for ti in range(len(pred_ids))
-        ):
-            if matched_det[di] is None and tid not in matched_track:
-                matched_det[di] = tid
-                matched_track.add(tid)
-
-    new_tracked = {}
-
-    for di, det in enumerate(detections):
-        tid = matched_det[di]
-        if tid is not None:
-            old     = _tracked[tid]
-            history = old.get("history", [])
-            if now - old["t"] >= VEL_MIN_DT:
-                history = (history + [(now, det["x"], det["y"])])[-VEL_HISTORY_N:]
-            new_vx, new_vy = _fit_velocity(history) if len(history) >= VEL_HISTORY_MIN \
-                             else (old["vx"], old["vy"])
-            spd = math.hypot(new_vx, new_vy)
-            if spd > MAX_ROBOT_SPEED:
-                new_vx *= MAX_ROBOT_SPEED / spd
-                new_vy *= MAX_ROBOT_SPEED / spd
-            new_tracked[tid] = {"x": det["x"], "y": det["y"], "t": now,
-                                 "vx": new_vx, "vy": new_vy, "lost": 0, "history": history}
-        else:
-            if len(new_tracked) >= MAX_ROBOTS:
-                continue
-            tid = _next_id;  _next_id += 1
-            new_tracked[tid] = {"x": det["x"], "y": det["y"], "t": now,
-                                 "vx": 0.0, "vy": 0.0, "lost": 0,
-                                 "history": [(now, det["x"], det["y"])]}
-        det["id"] = tid
-        det["vx"] = round(new_tracked[tid]["vx"], 3)
-        det["vy"] = round(new_tracked[tid]["vy"], 3)
-
-    result = list(detections)
-    for tid, tr in _tracked.items():
-        if tid in matched_track:
-            continue
-        dt     = now - tr["t"]
-        px, py = _predict_with_bounce(tr["x"], tr["y"], tr["vx"], tr["vy"], dt)
-        new_tracked[tid] = {**tr, "x": px, "y": py, "t": now, "lost": tr["lost"] + 1}
-        result.append({"x": round(px, 3), "y": round(py, 3),
-                        "pts": 0, "method": "predicted", "confidence": 0.0,
-                        "id": tid, "vx": round(tr["vx"], 3), "vy": round(tr["vy"], 3)})
-
-    _tracked = new_tracked
-    return result
 
 
 # ── Ball prediction functions ─────────────────────────────────────────────────
@@ -218,6 +132,7 @@ def _extrapolate_ball(x, y, vx, vy, dt, robots=None):
 
 def on_update(key, value):
     global _robot_pos, _imu_pitch, _sim_state
+    global _robot_last
     global _vel_history, _vel_last_t, _last_detection_t
     global _last_ball_vx, _last_ball_vy
     global _hidden_state, _hidden_state_t, _ball_lost
@@ -248,17 +163,46 @@ def on_update(key, value):
             pass
         return
 
-    # ── Robot tracking ────────────────────────────────────────────────────────
-    if key == "other_robots_raw":
+    # ── Robot dead-reckoning ──────────────────────────────────────────────────
+    if key == "other_robots_detected":
         with _perf.measure("robots"):
             try:
-                payload    = json.loads(value)
-                origin     = payload.get("origin")
-                robot_list = payload.get("robots", [])
+                payload = json.loads(value)
+                origin  = payload.get("origin")
+                detected = payload.get("robots", [])
+                det_t    = payload.get("t", time.monotonic())
             except Exception:
                 return
-            now    = time.monotonic()
-            result = _match_and_track(robot_list, now)
+
+            now = time.monotonic()
+
+            # Update cache with currently detected robots
+            detected_ids = set()
+            for r in detected:
+                rid = r.get("id")
+                if rid is not None:
+                    detected_ids.add(rid)
+                    _robot_last[rid] = {
+                        "x": r["x"], "y": r["y"],
+                        "vx": r.get("vx", 0.0), "vy": r.get("vy", 0.0),
+                        "t": det_t,
+                    }
+
+            # Dead-reckon robots that were tracked but not detected this frame
+            result = list(detected)
+            for rid, last in list(_robot_last.items()):
+                if rid in detected_ids:
+                    continue
+                dt = now - last["t"]
+                px, py = _predict_with_bounce(last["x"], last["y"],
+                                              last["vx"], last["vy"], dt)
+                result.append({
+                    "x": round(px, 3), "y": round(py, 3),
+                    "pts": 0, "method": "predicted", "confidence": 0.0,
+                    "id": rid,
+                    "vx": round(last["vx"], 3), "vy": round(last["vy"], 3),
+                })
+
             mb.set("other_robots", json.dumps({"origin": origin, "robots": result}))
         return
 
@@ -359,7 +303,7 @@ if __name__ == "__main__":
 
     print("[PREDICT] Starting prediction node...")
     mb.setcallback(
-        ["ball_raw", "other_robots_raw", "robot_position", "imu_pitch", "sim_state"],
+        ["ball_raw", "other_robots_detected", "robot_position", "imu_pitch", "sim_state"],
         on_update,
     )
     try:
