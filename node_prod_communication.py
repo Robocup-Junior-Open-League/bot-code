@@ -1,10 +1,12 @@
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
+from utils.perf_monitor import PerfMonitor
 import json
 import os
 
 DISPLAY_LIMIT = 10   # Max collection entries shown per value
 
-mb = TelemetryBroker()
+mb    = TelemetryBroker()
+_perf = PerfMonitor("node_prod_communication", broker=mb)
 
 CURSOR_UP_LEFT = "\033[H"
 HIDE_CURSOR    = "\033[?25l"
@@ -30,12 +32,13 @@ print(HIDE_CURSOR, end="")
 
 while True:
     try:
-        data = mb.getall()
-        output = ""
-        os.system('cls' if os.name == 'nt' else 'clear')
-        for key, value in sorted(data.items()):
-            output += f"{key} : {_truncate(value)}\n"
-        print(f"{CURSOR_UP_LEFT}{output}", end="\r", flush=True)
+        with _perf.measure("loop"):
+            data = mb.getall()
+            output = ""
+            os.system('cls' if os.name == 'nt' else 'clear')
+            for key, value in sorted(data.items()):
+                output += f"{key} : {_truncate(value)}\n"
+            print(f"{CURSOR_UP_LEFT}{output}", end="\r", flush=True)
 
     except KeyboardInterrupt:
         print(SHOW_CURSOR)

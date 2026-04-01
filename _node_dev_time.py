@@ -1,4 +1,5 @@
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
+from utils.perf_monitor import PerfMonitor
 import json
 import threading
 import time
@@ -11,6 +12,7 @@ BALL_SAMPLE_S      = 0.1  # minimum interval between saved ball position samples
 # ─────────────────────────────────────────────────────────────────────────────
 
 mb              = TelemetryBroker()
+_perf           = PerfMonitor("node_time", broker=mb)
 _start          = time.monotonic()
 _pos_lock       = threading.Lock()
 _pos_history    = []    # [{"x": float, "y": float, "t": float}, ...]
@@ -52,54 +54,57 @@ def on_update(key, value):
     if key == "robot_position":
         if now - _pos_last_t < POSITION_SAMPLE_S:
             return
-        try:
-            pos = json.loads(value)
-            entry = {"x": float(pos["x"]), "y": float(pos["y"]), "t": round(_elapsed(), 3)}
-        except Exception:
-            return
-        _pos_last_t = now
-        with _pos_lock:
-            _pos_history.append(entry)
-            _prune_list(_pos_history)
-            snapshot = list(_pos_history)
-        mb.set("position_history", json.dumps(snapshot))
+        with _perf.measure("pos_history"):
+            try:
+                pos = json.loads(value)
+                entry = {"x": float(pos["x"]), "y": float(pos["y"]), "t": round(_elapsed(), 3)}
+            except Exception:
+                return
+            _pos_last_t = now
+            with _pos_lock:
+                _pos_history.append(entry)
+                _prune_list(_pos_history)
+                snapshot = list(_pos_history)
+            mb.set("position_history", json.dumps(snapshot))
 
     elif key == "other_robots":
         if now - _robots_last_t < POSITION_SAMPLE_S:
             return
-        try:
-            payload = json.loads(value)
-            # Support both new {"origin":…,"robots":[…]} and old bare-list formats.
-            robot_list = payload.get("robots", payload) if isinstance(payload, dict) else payload
-            robots = [{"x": float(r["x"]), "y": float(r["y"]),
-                       "id": int(r.get("id", 0))}
-                      for r in robot_list]
-        except Exception:
-            return
-        _robots_last_t = now
-        entry = {"t": round(_elapsed(), 3), "robots": robots}
-        with _robots_lock:
-            _robots_history.append(entry)
-            _prune_list(_robots_history)
-            snapshot = list(_robots_history)
-        mb.set("other_robots_history", json.dumps(snapshot))
+        with _perf.measure("robots_history"):
+            try:
+                payload = json.loads(value)
+                # Support both new {"origin":…,"robots":[…]} and old bare-list formats.
+                robot_list = payload.get("robots", payload) if isinstance(payload, dict) else payload
+                robots = [{"x": float(r["x"]), "y": float(r["y"]),
+                           "id": int(r.get("id", 0))}
+                          for r in robot_list]
+            except Exception:
+                return
+            _robots_last_t = now
+            entry = {"t": round(_elapsed(), 3), "robots": robots}
+            with _robots_lock:
+                _robots_history.append(entry)
+                _prune_list(_robots_history)
+                snapshot = list(_robots_history)
+            mb.set("other_robots_history", json.dumps(snapshot))
 
     elif key == "ball":
         if now - _ball_last_t < BALL_SAMPLE_S:
             return
-        try:
-            pos = json.loads(value).get("global_pos")
-            if pos is None:
+        with _perf.measure("ball_history"):
+            try:
+                pos = json.loads(value).get("global_pos")
+                if pos is None:
+                    return
+                entry = {"x": float(pos["x"]), "y": float(pos["y"]), "t": round(_elapsed(), 3)}
+            except Exception:
                 return
-            entry = {"x": float(pos["x"]), "y": float(pos["y"]), "t": round(_elapsed(), 3)}
-        except Exception:
-            return
-        _ball_last_t = now
-        with _ball_lock:
-            _ball_history.append(entry)
-            _prune_list(_ball_history)
-            snapshot = list(_ball_history)
-        mb.set("ball_history", json.dumps(snapshot))
+            _ball_last_t = now
+            with _ball_lock:
+                _ball_history.append(entry)
+                _prune_list(_ball_history)
+                snapshot = list(_ball_history)
+            mb.set("ball_history", json.dumps(snapshot))
 
 
 if __name__ == "__main__":
