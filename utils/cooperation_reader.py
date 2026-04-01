@@ -26,6 +26,7 @@ simply ignored by the node.
 
 import json
 import threading
+import random as _random
 
 try:
     import serial as _serial
@@ -104,3 +105,79 @@ class SerialCooperationReader(BaseCooperationReader):
         finally:
             ser.close()
             print("[COOP] Serial closed.")
+
+
+class SimCooperationReader(BaseCooperationReader):
+    """
+    Simulation fallback: generates cooperation frames by applying Gaussian
+    jitter to simulator state positions.
+
+    *get_sim_state* and *get_ball_sim* are zero-argument callables returning
+    the current sim_state dict and ball sim_pos dict respectively (or None).
+
+    The ally robot slot is chosen randomly at startup and stays consistent
+    for the process lifetime.
+    """
+
+    RATE_HZ    = 10.0
+    JITTER_STD = 0.03  # metres
+
+    def __init__(self, get_sim_state, get_ball_sim):
+        self._get_sim_state = get_sim_state
+        self._get_ball_sim  = get_ball_sim
+        self._ally_idx      = _random.randint(0, 2)
+        self._stop_ev       = threading.Event()
+        self._thread        = None
+
+    def start(self, on_frame):
+        self._stop_ev.clear()
+        self._thread = threading.Thread(
+            target=self._run, args=(on_frame,),
+            daemon=True, name="coop-sim",
+        )
+        self._thread.start()
+        print(f"[COOP] No serial port found — using simulation fallback (ally slot {self._ally_idx}).")
+
+    def stop(self):
+        self._stop_ev.set()
+
+    def _jitter(self, x, y):
+        return (
+            round(x + _random.gauss(0, self.JITTER_STD), 4),
+            round(y + _random.gauss(0, self.JITTER_STD), 4),
+        )
+
+    def _run(self, on_frame):
+        interval = 1.0 / self.RATE_HZ
+        while not self._stop_ev.is_set():
+            sim  = self._get_sim_state()
+            ball = self._get_ball_sim()
+
+            if sim is not None:
+                obstacles = sim.get("obstacles", [])
+                if obstacles:
+                    ally_idx = self._ally_idx % len(obstacles)
+                    ax, ay   = self._jitter(float(obstacles[ally_idx][0]),
+                                            float(obstacles[ally_idx][1]))
+                    data = {"main_robot_pos": {"x": ax, "y": ay, "confidence": 0.9}}
+
+                    slot = 1
+                    for i, obs in enumerate(obstacles):
+                        if slot > 3:
+                            break
+                        if i == ally_idx:
+                            continue
+                        ox, oy = self._jitter(float(obs[0]), float(obs[1]))
+                        data[f"other_pos_{slot}"] = {"x": ox, "y": oy, "confidence": 0.85}
+                        slot += 1
+
+                    if ball is not None:
+                        try:
+                            bx, by = self._jitter(float(ball["x"]), float(ball["y"]))
+                            data["ball_pos"] = {"x": bx, "y": by, "confidence": 0.8}
+                        except (KeyError, TypeError, ValueError):
+                            pass
+
+                    on_frame(data)
+
+            self._stop_ev.wait(interval)

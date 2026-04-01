@@ -132,13 +132,13 @@ def _on_measurement(angle, distance, quality):
     _angle_dict[int(round(angle))] = distance
     _batch_count += 1
     if _batch_count >= LIDAR_BATCH_SIZE:
-        with _perf.measure("lidar"):
+        with _perf.measure("lidar_hw"):
             mb.set("lidar", json.dumps(_angle_dict))
         _batch_count = 0
 
 
 def _on_scan(batch):
-    with _perf.measure("lidar"):
+    with _perf.measure("lidar_sim"):
         _angle_dict.update(batch)
         mb.set("lidar", json.dumps(_angle_dict))
 

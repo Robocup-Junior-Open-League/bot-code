@@ -30,14 +30,14 @@ def on_measurement(angle, distance, quality):
     angle_dict[int(round(angle))] = distance
     _batch_count += 1
     if _batch_count >= BATCH_SIZE:
-        with _perf.measure("batch"):
+        with _perf.measure("hardware"):
             mb.set("lidar", json.dumps(angle_dict))
         _batch_count = 0
 
 
 def on_scan(batch):
     """Batch callback for simulation: receives a full {angle: dist_mm} dict at once."""
-    with _perf.measure("scan"):
+    with _perf.measure("sim"):
         angle_dict.update(batch)
         mb.set("lidar", json.dumps(angle_dict))
 

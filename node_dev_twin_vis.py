@@ -79,7 +79,7 @@ _art_lidar = ax.scatter([], [], s=5, c='#222222', zorder=10, animated=True)
 
 # Own robot
 _art_self = patches.Circle((0, 0), ROBOT_RADIUS,
-    lw=1.5, edgecolor='#555555', facecolor='#cccccc',
+    lw=1.5, edgecolor='#2a7a2a', facecolor='#aaddaa',
     zorder=7, animated=True, visible=False)
 ax.add_patch(_art_self)
 
@@ -152,8 +152,8 @@ def _sim_cross(color):
     return art
 
 _art_sim_ball = _sim_cross('darkorange')
-_art_sim_self = _sim_cross('#555555')
-_art_sim_obs  = [_sim_cross(_TAB10[i]) for i in range(3)]
+_art_sim_self = _sim_cross('#2a7a2a')
+_art_sim_obs = [_sim_cross((0.90, 0.22, 0.18)) for _ in range(3)]
 
 # Status text (inside axes, top-left corner)
 _art_status = ax.text(0.01, 0.99, '', transform=ax.transAxes,
@@ -228,8 +228,9 @@ def _redraw():
             ox, oy    = r[0], r[1]
             method    = str(r[2]) if len(r) > 2 else ""
             rid       = int(r[3]) if len(r) > 3 else 0
+            is_ally   = r[4] if len(r) > 4 else False
             predicted = method == "predicted"
-            c_solid   = _TAB10[(rid - 1) % 10]
+            c_solid   = (0.13, 0.53, 0.90) if is_ally else (0.90, 0.22, 0.18)
             c_face    = c_solid + (0.15 if predicted else 0.3,)
             circ.set_center((ox, oy))
             circ.set_edgecolor(c_solid)
@@ -403,7 +404,8 @@ def on_update(key, value):
                 else:
                     robot_list = payload
                 _other_robots = [[float(r["x"]), float(r["y"]),
-                                   r.get("method", ""), int(r.get("id", 0))]
+                                   r.get("method", ""), int(r.get("id", 0)),
+                                   bool(r.get("ally", False))]
                                   for r in robot_list]
 
             elif key == "lidar_walls":
@@ -442,7 +444,7 @@ if __name__ == "__main__":
         "imu_pitch":            lambda v: float(v),
         "lidar":                lambda v: {int(k): int(x) for k, x in json.loads(v).items()},
         "robot_position":       lambda v: (float(json.loads(v)["x"]), float(json.loads(v)["y"])),
-        "other_robots":         lambda v: [[float(r["x"]), float(r["y"]), r.get("method", ""), int(r.get("id", 0))]
+        "other_robots":         lambda v: [[float(r["x"]), float(r["y"]), r.get("method", ""), int(r.get("id", 0)), bool(r.get("ally", False))]
                                             for r in (lambda p: p.get("robots", p) if isinstance(p, dict) else p)(json.loads(v))],
         "lidar_walls":          lambda v: json.loads(v),
         "position_history":     lambda v: json.loads(v),
