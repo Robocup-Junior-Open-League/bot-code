@@ -8,6 +8,7 @@ import threading
 REFRESH_HZ = 4   # display refresh rate
 
 PERF_NODES = [
+    # ── Individual nodes ──────────────────────────────────────────────────────
     "node_imu",
     "node_lidar",
     "node_pos_walls",
@@ -17,6 +18,11 @@ PERF_NODES = [
     "node_predict_ball",
     "node_vision",
     "node_twin_vis",
+    # ── Production (combined) nodes ───────────────────────────────────────────
+    "node_prod_sensor",
+    "node_prod_positioning",
+    "node_prod_prediction",
+    "node_prod_vision",
 ]
 # ─────────────────────────────────────────────────────────────────────────────
 
