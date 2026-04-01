@@ -13,7 +13,7 @@ PERF_NODES = [
     "node_prod_positioning",
     "node_prod_prediction",
     "node_prod_vision",
-    "node_prod_communication",
+    "node_cooperation",
     # ── Individual (dev) nodes ────────────────────────────────────────────────
     "node_imu",
     "node_lidar",
@@ -24,8 +24,6 @@ PERF_NODES = [
     "node_predict_ball",
     "node_vision",
     "node_twin_vis",
-    "node_time",
-    "node_bus_display",
     "node_time",
     "node_bus_display",
 ]
