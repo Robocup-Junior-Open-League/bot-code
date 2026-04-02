@@ -13,15 +13,17 @@ Expected frame schema (one JSON object per newline for SerialCooperationReader):
       "other_pos_2":    {"x": <float>, "y": <float>, "confidence": <float>},
       "other_pos_3":    {"x": <float>, "y": <float>, "confidence": <float>},
       "ball_pos":       {"x": <float>, "y": <float>, "confidence": <float>},
+      "ball_pred":      {"x": <float>, "y": <float>, "confidence": <float>},
       "other_pred_1":   {"x": <float>, "y": <float>, "confidence": <float>},
       "other_pred_2":   {"x": <float>, "y": <float>, "confidence": <float>},
       "other_pred_3":   {"x": <float>, "y": <float>, "confidence": <float>}
     }
 
-Detections (other_pos_*) are freshly observed positions; predictions
-(other_pred_*) are the ally's own forward-projected estimates for robots
-it did not detect this frame.  All fields are optional; missing ones are
-simply ignored by the node.
+Detections (other_pos_*, ball_pos) are freshly observed positions.
+Predictions (other_pred_*, ball_pred) are forward-projected estimates for
+objects not detected this frame.  ball_pos and ball_pred are mutually
+exclusive: send whichever applies.  All fields are optional; missing ones
+are simply ignored by the node.
 """
 
 import json

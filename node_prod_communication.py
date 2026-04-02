@@ -52,7 +52,8 @@ def _process_frame(data):
 
     # Individual fields for twin_vis
     for key in ("main_robot_pos", "other_pos_1", "other_pos_2", "other_pos_3",
-                "ball_pos", "other_pred_1", "other_pred_2", "other_pred_3"):
+                "ball_pos", "ball_pred",
+                "other_pred_1", "other_pred_2", "other_pred_3"):
         if key in data:
             mb.set(f"ally_{key}", json.dumps(data[key]))
 
@@ -63,6 +64,7 @@ def _process_frame(data):
         "other_pos":  [_norm(data.get(f"other_pos_{i}"))  for i in range(1, 4)],
         "other_pred": [_norm(data.get(f"other_pred_{i}")) for i in range(1, 4)],
         "ball_pos":   _norm(data.get("ball_pos")),
+        "ball_pred":  _norm(data.get("ball_pred")),
     }))
 
 

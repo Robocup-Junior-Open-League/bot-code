@@ -34,6 +34,7 @@ MAX_ROBOT_SPEED    = 2.0
 _MAX_PRED_DT        = 0.5
 MAX_CORRECTION_AGE  = 0.5   # seconds — ignore ally data older than this
 MAX_ALLY_MATCH_DIST = 0.30  # metres  — max distance to match an ally observation
+MAX_BALL_AGE        = 1.0   # seconds — treat ball as lost if not seen within this time
 
 # ── Time / history ────────────────────────────────────────────────────────────
 TIME_PUBLISH_HZ   = 10
@@ -63,6 +64,7 @@ _ally_data    = None   # latest ally_data payload from communication node
 _ally_data_t  = 0.0    # monotonic time of last ally_data update
 _ally_id      = None   # persistent ally robot ID
 _sys_ball_pos = None   # latest raw ball position from vision node
+_sys_ball_t   = 0.0    # monotonic time of last ball detection
 
 # ── Time node state ───────────────────────────────────────────────────────────
 _time_start     = time.monotonic()
@@ -522,12 +524,16 @@ def _apply_ally_updates(robots, now):
                 tr["y"] = round((tr["y"] + apos[1]) / 2, 3)
 
     with _perf.measure("ally_ball"):
+        ball_lost   = (now - _sys_ball_t) >= MAX_BALL_AGE
         ally_ball_d = _ally_data.get("ball_pos")
-        if ally_ball_d is not None:
-            apos  = _apos(ally_ball_d)
-            aconf = _aconf(ally_ball_d)
-            if apos is not None:
-                if _sys_ball_pos is not None:
+        ally_ball_p = _ally_data.get("ball_pred")
+
+        if not ball_lost and _sys_ball_pos is not None:
+            # Ball is visible: fuse our detection with ally detection
+            if ally_ball_d is not None:
+                apos  = _apos(ally_ball_d)
+                aconf = _aconf(ally_ball_d)
+                if apos is not None:
                     sconf = float(_sys_ball_pos.get("confidence", 1.0))
                     total = aconf + sconf
                     mb.set("ball_pos", json.dumps({
@@ -535,7 +541,14 @@ def _apply_ally_updates(robots, now):
                         "y": round((sconf * _sys_ball_pos["y"] + aconf * apos[1]) / total, 3),
                         "confidence": round((sconf + aconf) / 2, 3),
                     }))
-                else:
+        else:
+            # Ball is lost: use ally detection if available, else fall back to
+            # ally prediction (can't be disproven since we can't see the ball)
+            source = ally_ball_d if ally_ball_d is not None else ally_ball_p
+            if source is not None:
+                apos  = _apos(source)
+                aconf = _aconf(source)
+                if apos is not None:
                     mb.set("ball_pos", json.dumps({
                         "x": round(apos[0], 3), "y": round(apos[1], 3),
                         "confidence": round(aconf, 3),
@@ -548,7 +561,7 @@ def on_update(key, value):
     global _imu_pitch, _lidar, _lidar_walls, _robot_pos
     global _robots_last_t, _ball_last_t
     global _ally_data, _ally_data_t
-    global _sys_ball_pos
+    global _sys_ball_pos, _sys_ball_t
 
     if value is None:
         return
@@ -640,6 +653,7 @@ def on_update(key, value):
                 "x": float(pos["x"]), "y": float(pos["y"]),
                 "confidence": float(pos.get("confidence", 1.0)),
             }
+            _sys_ball_t = now
         except Exception:
             return
         if now - _ball_last_t < BALL_SAMPLE_S:
