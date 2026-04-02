@@ -459,7 +459,7 @@ def on_update(key, value):
 
             elif key == "ally_id":
                 try:
-                    _ally_id = int(value) if value and value.strip() else None
+                    _ally_id = int(value) if value else None
                 except (ValueError, TypeError):
                     _ally_id = None
 
