@@ -43,6 +43,7 @@ class BaseCooperationReader:
 
     Subclasses must implement start(on_frame) and stop().
     on_frame(data: dict) is called from a background thread for each frame.
+    send(data: dict) transmits a frame to the remote; default is a no-op.
     """
 
     def start(self, on_frame):
@@ -52,6 +53,10 @@ class BaseCooperationReader:
     def stop(self):
         """Signal the reader to stop and release all resources."""
         raise NotImplementedError
+
+    def send(self, data: dict):
+        """Send a JSON frame to the remote.  No-op by default."""
+        pass
 
 
 class SerialCooperationReader(BaseCooperationReader):
@@ -67,6 +72,8 @@ class SerialCooperationReader(BaseCooperationReader):
         self._baud    = baud or self.DEFAULT_BAUD
         self._stop_ev = threading.Event()
         self._thread  = None
+        self._ser     = None
+        self._ser_lock = threading.Lock()
 
     def start(self, on_frame):
         self._stop_ev.clear()
@@ -79,6 +86,19 @@ class SerialCooperationReader(BaseCooperationReader):
     def stop(self):
         self._stop_ev.set()
 
+    def send(self, data: dict):
+        """Write a JSON frame (newline-terminated) to the serial port."""
+        with self._ser_lock:
+            ser = self._ser
+        if ser is None:
+            return
+        try:
+            line = json.dumps(data, separators=(",", ":")) + "\n"
+            with self._ser_lock:
+                ser.write(line.encode("utf-8"))
+        except Exception as e:
+            print(f"[COOP] Send error: {e}")
+
     def _run(self, on_frame):
         try:
             ser = _serial.Serial(self._port, self._baud, timeout=1)
@@ -86,6 +106,9 @@ class SerialCooperationReader(BaseCooperationReader):
         except _serial.SerialException as e:
             print(f"[COOP] Could not open {self._port}: {e}")
             return
+
+        with self._ser_lock:
+            self._ser = ser
 
         buf = b""
         try:
@@ -105,6 +128,8 @@ class SerialCooperationReader(BaseCooperationReader):
                     except (json.JSONDecodeError, UnicodeDecodeError) as e:
                         print(f"[COOP] Parse error: {e} — {line[:80]}")
         finally:
+            with self._ser_lock:
+                self._ser = None
             ser.close()
             print("[COOP] Serial closed.")
 
