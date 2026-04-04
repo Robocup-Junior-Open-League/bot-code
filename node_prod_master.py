@@ -28,8 +28,8 @@ TEAM_ENEMY = 1
 #
 # col  (0–3) : vertical strip, increases left → right
 # row  (0–3) : horizontal strip, increases bottom → top
-# rank        : synonym for row  — "which horizontal band"
-# vertical    : synonym for col  — "which vertical band"
+# rank       : synonym for row  — "which horizontal band"
+# file       : synonym for col  — "which file band"
 #
 # ── Game-state zones ──────────────────────────────────────────────────────────
 # Team 1 advances downward toward team 0's goal:
@@ -64,7 +64,7 @@ _ally_id      = None   # ID of allied robot (team 0); all others are team 1
 # ── Low-level subdivision math ────────────────────────────────────────────────
 
 def col_of(x):
-    """Vertical column index (0 = leftmost) for a global x coordinate."""
+    """file column index (0 = leftmost) for a global x coordinate."""
     return max(0, min(COLS - 1, int(x / _COL_W)))
 
 
@@ -155,9 +155,9 @@ def in_rank(x, y, rank):
     return row_of(y) == rank
 
 
-def in_vertical(x, y, vertical):
-    """True if (x, y) is in vertical column `vertical` (0 = left, 3 = right)."""
-    return col_of(x) == vertical
+def in_file(x, y, file):
+    """True if (x, y) is in file column `file` (0 = left, 3 = right)."""
+    return col_of(x) == file
 
 
 # ── Own-robot location helpers ────────────────────────────────────────────────
@@ -172,9 +172,9 @@ def self_in_rank(rank):
     return p is not None and in_rank(p["x"], p["y"], rank)
 
 
-def self_in_vertical(vertical):
+def self_in_file(file):
     p = self_pos()
-    return p is not None and in_vertical(p["x"], p["y"], vertical)
+    return p is not None and in_file(p["x"], p["y"], file)
 
 
 # ── Ball location helpers ─────────────────────────────────────────────────────
@@ -189,9 +189,9 @@ def ball_in_rank(rank):
     return p is not None and in_rank(p["x"], p["y"], rank)
 
 
-def ball_in_vertical(vertical):
+def ball_in_file(file):
     p = ball_pos()
-    return p is not None and in_vertical(p["x"], p["y"], vertical)
+    return p is not None and in_file(p["x"], p["y"], file)
 
 
 # ── Per-robot location helpers ────────────────────────────────────────────────
@@ -206,9 +206,9 @@ def robot_in_rank(robot_id, rank):
     return r is not None and in_rank(r["x"], r["y"], rank)
 
 
-def robot_in_vertical(robot_id, vertical):
+def robot_in_file(robot_id, file):
     r = robot_by_id(robot_id)
-    return r is not None and in_vertical(r["x"], r["y"], vertical)
+    return r is not None and in_file(r["x"], r["y"], file)
 
 
 # ── Game state ────────────────────────────────────────────────────────────────
