@@ -14,6 +14,7 @@ PERF_NODES = [
     "node_prod_prediction",
     "node_prod_vision",
     "node_prod_communication",
+    "node_prod_master",
     # ── Individual (dev) nodes ────────────────────────────────────────────────
     "node_dev_imu",
     "node_dev_lidar",
