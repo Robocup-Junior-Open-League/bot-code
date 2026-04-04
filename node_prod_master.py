@@ -382,7 +382,7 @@ def on_update(key, value):
         elif key == "ball":
             _ball = json.loads(value)
         elif key == "ally_id":
-            _ally_id = int(value) if value and value.strip() else None
+            _ally_id = int(value) if value else None
         else:
             return
     except (json.JSONDecodeError, TypeError, ValueError):
