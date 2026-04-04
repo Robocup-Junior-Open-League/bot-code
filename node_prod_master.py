@@ -284,36 +284,71 @@ def robot_in_file(robot_id, file):
 
 # ── Game state ────────────────────────────────────────────────────────────────
 
-def _velocity_score(dominant_team):
+def _ball_substate(dominant_team):
     """
-    Sum of directional contributions (+1 / -1) from every robot on the
-    dominant team and the ball, based on whether their vy points toward that
-    team's target goal.
+    Classify the current ball situation relative to the dominant team's robots.
 
-    Team 0 attacks upward   (vy > 0 → +1).
-    Team 1 attacks downward (vy < 0 → +1).
-    Zero velocity or missing data contributes 0.
-    Returns None when dominant_team is None.
+    Ball moving toward goal:
+        "shot"      — ball in front of both robots (closer to goal than both)
+        "frontpass" — ball between the two robots
+        "catch"     — ball behind both robots (farther from goal than both)
+
+    Ball moving away from goal:
+        "miss"      — ball in front of both robots
+        "backpass"  — ball between the two robots
+        "loss"      — ball behind both robots
+
+    With only one robot in the zone, "frontpass"/"backpass" are never returned;
+    only the in-front / behind distinction applies.
+
+    Returns None when dominant_team is None, ball position/velocity is unknown,
+    or no robots of the dominant team are tracked.
+
+    Team 0 attacks upward   (vy > 0 = toward goal).
+    Team 1 attacks downward (vy < 0 = toward goal).
     """
     if dominant_team is None:
         return None
 
-    def _contrib(vy):
-        if not vy:
-            return 0
-        if dominant_team == TEAM_US:
-            return 1 if vy > 0 else -1
-        return 1 if vy < 0 else -1
+    bp = ball_pos()
+    if bp is None:
+        return None
 
-    score = 0
-    for r in all_robots():
-        if r["team"] == dominant_team:
-            score += _contrib(r.get("vy"))
+    ball_vy = _ball.get("vy") if _ball is not None else None
+    if not ball_vy:
+        return None
 
-    if _ball is not None:
-        score += _contrib(_ball.get("vy"))
+    # "attack coordinate": higher value = closer to goal for the dominant team
+    if dominant_team == TEAM_US:
+        toward_goal = ball_vy > 0
+        ac = lambda y: y
+    else:
+        toward_goal = ball_vy < 0
+        ac = lambda y: -y
 
-    return score
+    robots = _team_positions(dominant_team)
+    if not robots:
+        return None
+
+    ball_ac   = ac(bp["y"])
+    robot_acs = [ac(r["y"]) for r in robots]
+
+    if len(robots) == 1:
+        in_front = ball_ac > robot_acs[0]
+        if toward_goal:
+            return "shot" if in_front else "catch"
+        else:
+            return "miss" if in_front else "loss"
+
+    max_ac = max(robot_acs)
+    min_ac = min(robot_acs)
+
+    if ball_ac > max_ac:
+        return "shot"      if toward_goal else "miss"
+    elif ball_ac < min_ac:
+        return "catch"     if toward_goal else "loss"
+    else:
+        return "frontpass" if toward_goal else "backpass"
 
 
 def _ball_side():
@@ -384,6 +419,7 @@ def game_state():
         "strength": "weak" | "strong" | None,
         "team":     0 | 1 | None,
         "side":     "left" | "center" | "right" | None,
+        "substate": "shot" | "frontpass" | "catch" | "miss" | "backpass" | "loss" | None,
         "team0":    {"state": ..., "strength": ...} | None,
         "team1":    {"state": ..., "strength": ...} | None,
     }
@@ -414,7 +450,7 @@ def game_state():
         "strength": dominant_strength,
         "team":     dominant_team,
         "side":     _ball_side(),
-        "velocity": _velocity_score(dominant_team),
+        "substate": _ball_substate(dominant_team),
         "team0":    s0,
         "team1":    s1,
     }
