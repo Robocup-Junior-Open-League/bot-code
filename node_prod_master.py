@@ -29,7 +29,7 @@ TEAM_ENEMY = 1
 # col  (0–3) : vertical strip, increases left → right
 # row  (0–3) : horizontal strip, increases bottom → top
 # rank       : synonym for row  — "which horizontal band"
-# file       : synonym for col  — "which file band"
+# file       : synonym for col  — "which vertical band"
 #
 # ── Game-state overview ───────────────────────────────────────────────────────
 #

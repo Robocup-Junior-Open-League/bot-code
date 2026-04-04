@@ -211,10 +211,10 @@ _art_status = ax.text(0.01, 0.99, '', transform=ax.transAxes,
               alpha=0.75, edgecolor='none'))
 
 # Game-state text (outside axes, below the legend on the right)
-_art_game_state = ax.text(1.02, -0.02, '', transform=ax.transAxes,
-    ha='left', va='top', fontsize=8, animated=True, zorder=15, clip_on=False,
+_art_game_state = ax.text(1.02, 0.055, '', transform=ax.transAxes,
+    ha='left', va='top', fontsize=12, animated=True, zorder=15, clip_on=False,
     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
-              alpha=0.75, edgecolor='none'))
+              alpha=0.75, edgecolor='gray'))
 
 # ── Legend ────────────────────────────────────────────────────────────────────
 _legend_handles = [
