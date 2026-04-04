@@ -49,6 +49,14 @@ _ROW_H = FIELD_HEIGHT / ROWS   # 0.5475 m per row
 _PUSH_ROW   = {TEAM_US: 2, TEAM_ENEMY: 1}
 _ATTACK_ROW = {TEAM_US: 3, TEAM_ENEMY: 0}
 
+# ── Ball control ──────────────────────────────────────────────────────────────
+# A robot is considered "on ball control" when its centre is within this
+# distance of the ball centre.  Value accounts for robot radius (0.09 m),
+# ball radius (0.021 m), and a small detection-noise buffer.
+ROBOT_RADIUS      = 0.09
+BALL_RADIUS       = 0.021
+BALL_CONTROL_DIST = ROBOT_RADIUS + BALL_RADIUS + 0.04   # ≈ 0.15 m
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 mb    = TelemetryBroker()
@@ -141,6 +149,66 @@ def ball_pos():
         "y":    float(gpos["y"]),
         "lost": bool(_ball.get("ball_lost", False)),
     }
+
+
+# ── Ball control ─────────────────────────────────────────────────────────────
+
+def _dist(ax, ay, bx, by):
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def on_ball(robot_id=None):
+    """
+    Return the robot currently closest to the ball and within BALL_CONTROL_DIST,
+    or None if no robot is in control.
+
+    If `robot_id` is given, return that robot's entry only if it is in control
+    (useful as a boolean check: ``if on_ball(my_id): ...``).
+
+    The returned dict is {"id": int|None, "x": float, "y": float,
+                           "predicted": bool, "team": int, "dist": float},
+    where id=None and team=TEAM_US represent the own robot.
+    """
+    bp = ball_pos()
+    if bp is None:
+        return None
+
+    candidates = []
+
+    # Own robot
+    sp = self_pos()
+    if sp is not None:
+        d = _dist(sp["x"], sp["y"], bp["x"], bp["y"])
+        if d <= BALL_CONTROL_DIST:
+            candidates.append({"id": None, "x": sp["x"], "y": sp["y"],
+                                "predicted": False, "team": TEAM_US, "dist": d})
+
+    # Tracked robots
+    for r in all_robots():
+        d = _dist(r["x"], r["y"], bp["x"], bp["y"])
+        if d <= BALL_CONTROL_DIST:
+            candidates.append({**r, "dist": d})
+
+    if not candidates:
+        return None
+
+    closest = min(candidates, key=lambda c: c["dist"])
+
+    if robot_id is not None:
+        return closest if closest["id"] == robot_id else None
+
+    return closest
+
+
+def self_on_ball():
+    """True if the own robot is the closest robot in ball-control range."""
+    r = on_ball()
+    return r is not None and r["id"] is None
+
+
+def ball_controlled():
+    """True if any robot (any team) is currently in ball-control range."""
+    return on_ball() is not None
 
 
 # ── Generic location predicates ───────────────────────────────────────────────
@@ -344,24 +412,33 @@ def game_side():
 def _publish(now):
     state = {"t": round(now, 3)}
 
-    p = self_pos()
-    if p is not None:
-        c, r = subdiv_of(p["x"], p["y"])
-        state["self"] = {"col": c, "row": r}
+    with _perf.measure("sectors"):
+        p = self_pos()
+        if p is not None:
+            c, r = subdiv_of(p["x"], p["y"])
+            state["self"] = {"col": c, "row": r}
 
-    robots_out = []
-    for rb in all_robots():
-        c, r = subdiv_of(rb["x"], rb["y"])
-        robots_out.append({"id": rb["id"], "col": c, "row": r,
-                            "predicted": rb["predicted"], "team": rb["team"]})
-    state["robots"] = robots_out
+        robots_out = []
+        for rb in all_robots():
+            c, r = subdiv_of(rb["x"], rb["y"])
+            robots_out.append({"id": rb["id"], "col": c, "row": r,
+                                "predicted": rb["predicted"], "team": rb["team"]})
+        state["robots"] = robots_out
 
-    bp = ball_pos()
-    if bp is not None:
-        c, r = subdiv_of(bp["x"], bp["y"])
-        state["ball"] = {"col": c, "row": r, "lost": bp["lost"]}
+        bp = ball_pos()
+        if bp is not None:
+            c, r = subdiv_of(bp["x"], bp["y"])
+            state["ball"] = {"col": c, "row": r, "lost": bp["lost"]}
 
-    state["game_state"] = game_state()
+    with _perf.measure("game_state"):
+        state["game_state"] = game_state()
+
+    with _perf.measure("ball_control"):
+        ctrl = on_ball()
+        state["ball_control"] = (
+            {"id": ctrl["id"], "team": ctrl["team"], "dist": round(ctrl["dist"], 3)}
+            if ctrl is not None else None
+        )
 
     mb.set("field_sectors", json.dumps(state))
 
@@ -388,8 +465,7 @@ def on_update(key, value):
     except (json.JSONDecodeError, TypeError, ValueError):
         return
 
-    with _perf.measure("sectors"):
-        _publish(time.monotonic())
+    _publish(time.monotonic())
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
