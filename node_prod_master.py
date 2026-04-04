@@ -11,25 +11,43 @@ from utils.perf_monitor import PerfMonitor
 FIELD_WIDTH  = 1.58   # metres — playing field only
 FIELD_HEIGHT = 2.19
 
+# ── Teams ─────────────────────────────────────────────────────────────────────
+# Team 0 = our team  — bottom goal  (y = -OUTER_MARGIN)
+# Team 1 = enemy     — top    goal  (y = FIELD_HEIGHT + OUTER_MARGIN)
+TEAM_US    = 0
+TEAM_ENEMY = 1
+
 # ── Subdivision grid ──────────────────────────────────────────────────────────
 # The field is split into COLS × ROWS = 4 × 4 = 16 equal subdivisions.
 #
-#   row 3 │ (0,3) (1,3) (2,3) (3,3) │
-#   row 2 │ (0,2) (1,2) (2,2) (3,2) │
-#   row 1 │ (0,1) (1,1) (2,1) (3,1) │
-#   row 0 │ (0,0) (1,0) (2,0) (3,0) │
+#   row 3 │ (0,3) (1,3) (2,3) (3,3) │  ← team 0 attack / team 1 own half
+#   row 2 │ (0,2) (1,2) (2,2) (3,2) │  ← team 0 push
+#   row 1 │ (0,1) (1,1) (2,1) (3,1) │  ← team 1 push
+#   row 0 │ (0,0) (1,0) (2,0) (3,0) │  ← team 1 attack / team 0 own half
 #           col 0  col 1  col 2  col 3
 #
 # col  (0–3) : vertical strip, increases left → right
 # row  (0–3) : horizontal strip, increases bottom → top
 # rank        : synonym for row  — "which horizontal band"
 # vertical    : synonym for col  — "which vertical band"
+#
+# ── Game-state zones ──────────────────────────────────────────────────────────
+# Team 1 advances downward toward team 0's goal:
+#   row 1 → push    row 0 → attack
+# Team 0 advances upward toward team 1's goal:
+#   row 2 → push    row 3 → attack
+#
+# strength: "weak" = 1 robot in zone, "strong" = 2+ robots in zone
+# side (ball's horizontal position): col 0 → "left", col 1–2 → "center", col 3 → "right"
 
 COLS = 4
 ROWS = 4
 
 _COL_W = FIELD_WIDTH  / COLS   # 0.395 m per column
 _ROW_H = FIELD_HEIGHT / ROWS   # 0.5475 m per row
+
+_PUSH_ROW   = {TEAM_US: 2, TEAM_ENEMY: 1}
+_ATTACK_ROW = {TEAM_US: 3, TEAM_ENEMY: 0}
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -40,6 +58,7 @@ _perf = PerfMonitor("node_prod_master", broker=mb, print_every=100)
 _robot_pos    = None   # {"x": float, "y": float}
 _other_robots = None   # {"robots": [...]} from prediction node
 _ball         = None   # {"global_pos": {x,y}, "ball_lost": bool, ...}
+_ally_id      = None   # ID of allied robot (team 0); all others are team 1
 
 
 # ── Low-level subdivision math ────────────────────────────────────────────────
@@ -74,7 +93,9 @@ def self_pos():
 def all_robots():
     """All tracked other robots (detections and predictions).
 
-    Returns a list of {"id": int, "x": float, "y": float, "predicted": bool}.
+    Returns a list of {"id": int, "x": float, "y": float,
+                        "predicted": bool, "team": int}.
+    The ally robot (same team as us) has team=0; all others have team=1.
     """
     if _other_robots is None:
         return []
@@ -83,11 +104,13 @@ def all_robots():
         x, y = r.get("x"), r.get("y")
         if x is None or y is None:
             continue
+        rid = r.get("id")
         out.append({
-            "id":        r.get("id"),
+            "id":        rid,
             "x":         float(x),
             "y":         float(y),
             "predicted": r.get("method") == "predicted",
+            "team":      TEAM_US if rid == _ally_id else TEAM_ENEMY,
         })
     return out
 
@@ -95,7 +118,7 @@ def all_robots():
 def robot_by_id(robot_id):
     """Position of a specific tracked robot, or None.
 
-    Returns {"id": int, "x": float, "y": float, "predicted": bool}.
+    Returns {"id": int, "x": float, "y": float, "predicted": bool, "team": int}.
     """
     for r in all_robots():
         if r["id"] == robot_id:
@@ -140,19 +163,16 @@ def in_vertical(x, y, vertical):
 # ── Own-robot location helpers ────────────────────────────────────────────────
 
 def self_in_subdivision(col, row):
-    """True if the own robot is in subdivision (col, row)."""
     p = self_pos()
     return p is not None and in_subdivision(p["x"], p["y"], col, row)
 
 
 def self_in_rank(rank):
-    """True if the own robot is in horizontal row `rank`."""
     p = self_pos()
     return p is not None and in_rank(p["x"], p["y"], rank)
 
 
 def self_in_vertical(vertical):
-    """True if the own robot is in vertical column `vertical`."""
     p = self_pos()
     return p is not None and in_vertical(p["x"], p["y"], vertical)
 
@@ -160,19 +180,16 @@ def self_in_vertical(vertical):
 # ── Ball location helpers ─────────────────────────────────────────────────────
 
 def ball_in_subdivision(col, row):
-    """True if the ball is in subdivision (col, row)."""
     p = ball_pos()
     return p is not None and in_subdivision(p["x"], p["y"], col, row)
 
 
 def ball_in_rank(rank):
-    """True if the ball is in horizontal row `rank`."""
     p = ball_pos()
     return p is not None and in_rank(p["x"], p["y"], rank)
 
 
 def ball_in_vertical(vertical):
-    """True if the ball is in vertical column `vertical`."""
     p = ball_pos()
     return p is not None and in_vertical(p["x"], p["y"], vertical)
 
@@ -180,21 +197,146 @@ def ball_in_vertical(vertical):
 # ── Per-robot location helpers ────────────────────────────────────────────────
 
 def robot_in_subdivision(robot_id, col, row):
-    """True if robot `robot_id` is in subdivision (col, row)."""
     r = robot_by_id(robot_id)
     return r is not None and in_subdivision(r["x"], r["y"], col, row)
 
 
 def robot_in_rank(robot_id, rank):
-    """True if robot `robot_id` is in horizontal row `rank`."""
     r = robot_by_id(robot_id)
     return r is not None and in_rank(r["x"], r["y"], rank)
 
 
 def robot_in_vertical(robot_id, vertical):
-    """True if robot `robot_id` is in vertical column `vertical`."""
     r = robot_by_id(robot_id)
     return r is not None and in_vertical(r["x"], r["y"], vertical)
+
+
+# ── Game state ────────────────────────────────────────────────────────────────
+
+def _ball_side():
+    """Horizontal side of the ball: 'left', 'center', or 'right'. None if unknown."""
+    bp = ball_pos()
+    if bp is None:
+        return None
+    c = col_of(bp["x"])
+    if c == 0:
+        return "left"
+    if c == 3:
+        return "right"
+    return "center"
+
+
+def _team_positions(team):
+    """All known positions for `team` (including own robot for team 0)."""
+    positions = []
+    if team == TEAM_US:
+        sp = self_pos()
+        if sp:
+            positions.append(sp)
+    for r in all_robots():
+        if r["team"] == team:
+            positions.append({"x": r["x"], "y": r["y"]})
+    return positions
+
+
+def _team_game_state(team):
+    """
+    Compute the offensive game-state for a single team.
+
+    Returns {"state": "push"|"attack", "strength": "weak"|"strong"} or None
+    if no robots of this team are in an offensive row.
+
+    attack takes priority over push when robots are in both zones.
+    """
+    positions = _team_positions(team)
+    attack_row = _ATTACK_ROW[team]
+    push_row   = _PUSH_ROW[team]
+
+    in_attack = [p for p in positions if row_of(p["y"]) == attack_row]
+    in_push   = [p for p in positions if row_of(p["y"]) == push_row]
+
+    if in_attack:
+        return {"state": "attack", "strength": "strong" if len(in_attack) >= 2 else "weak"}
+    if in_push:
+        return {"state": "push",   "strength": "strong" if len(in_push)   >= 2 else "weak"}
+    return None
+
+
+def _state_score(s):
+    if s is None:
+        return 0
+    return (2 if s["state"] == "attack" else 1) * (2 if s["strength"] == "strong" else 1)
+
+
+def game_state():
+    """
+    Return the dominant game state across both teams.
+
+    Returns {
+        "state":    "push" | "attack" | None,
+        "strength": "weak" | "strong" | None,
+        "team":     0 | 1 | None,
+        "side":     "left" | "center" | "right" | None,
+        "team0":    {"state": ..., "strength": ...} | None,
+        "team1":    {"state": ..., "strength": ...} | None,
+    }
+
+    The top-level state/strength/team reflect whichever team has the more
+    dangerous situation (attack > push, strong > weak).  team0 and team1
+    contain the full per-team detail.
+    """
+    s0 = _team_game_state(TEAM_US)
+    s1 = _team_game_state(TEAM_ENEMY)
+    sc0, sc1 = _state_score(s0), _state_score(s1)
+
+    if sc0 == 0 and sc1 == 0:
+        dominant_state    = None
+        dominant_strength = None
+        dominant_team     = None
+    elif sc0 >= sc1:
+        dominant_state    = s0["state"]
+        dominant_strength = s0["strength"]
+        dominant_team     = TEAM_US
+    else:
+        dominant_state    = s1["state"]
+        dominant_strength = s1["strength"]
+        dominant_team     = TEAM_ENEMY
+
+    return {
+        "state":    dominant_state,
+        "strength": dominant_strength,
+        "team":     dominant_team,
+        "side":     _ball_side(),
+        "team0":    s0,
+        "team1":    s1,
+    }
+
+
+# ── Game-state convenience predicates ────────────────────────────────────────
+
+def is_push(team=None):
+    """True if the dominant state is 'push', optionally filtered by team."""
+    gs = game_state()
+    return gs["state"] == "push" and (team is None or gs["team"] == team)
+
+
+def is_attack(team=None):
+    """True if the dominant state is 'attack', optionally filtered by team."""
+    gs = game_state()
+    return gs["state"] == "attack" and (team is None or gs["team"] == team)
+
+
+def is_strong(team=None):
+    """True if the dominant state (optionally for a specific team) is 'strong'."""
+    if team is None:
+        return game_state()["strength"] == "strong"
+    ts = _team_game_state(team)
+    return ts is not None and ts["strength"] == "strong"
+
+
+def game_side():
+    """Horizontal side of the ball: 'left', 'center', 'right', or None."""
+    return _ball_side()
 
 
 # ── Broker publish ────────────────────────────────────────────────────────────
@@ -211,7 +353,7 @@ def _publish(now):
     for rb in all_robots():
         c, r = subdiv_of(rb["x"], rb["y"])
         robots_out.append({"id": rb["id"], "col": c, "row": r,
-                            "predicted": rb["predicted"]})
+                            "predicted": rb["predicted"], "team": rb["team"]})
     state["robots"] = robots_out
 
     bp = ball_pos()
@@ -219,13 +361,15 @@ def _publish(now):
         c, r = subdiv_of(bp["x"], bp["y"])
         state["ball"] = {"col": c, "row": r, "lost": bp["lost"]}
 
+    state["game_state"] = game_state()
+
     mb.set("field_sectors", json.dumps(state))
 
 
 # ── Broker callbacks ──────────────────────────────────────────────────────────
 
 def on_update(key, value):
-    global _robot_pos, _other_robots, _ball
+    global _robot_pos, _other_robots, _ball, _ally_id
 
     if value is None:
         return
@@ -237,9 +381,11 @@ def on_update(key, value):
             _other_robots = json.loads(value)
         elif key == "ball":
             _ball = json.loads(value)
+        elif key == "ally_id":
+            _ally_id = int(value) if value and value.strip() else None
         else:
             return
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError, ValueError):
         return
 
     with _perf.measure("sectors"):
@@ -249,7 +395,7 @@ def on_update(key, value):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    for key in ("robot_position", "other_robots", "ball"):
+    for key in ("robot_position", "other_robots", "ball", "ally_id"):
         try:
             val = mb.get(key)
             if val is not None:
@@ -257,7 +403,7 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    mb.setcallback(["robot_position", "other_robots", "ball"], on_update)
+    mb.setcallback(["robot_position", "other_robots", "ball", "ally_id"], on_update)
     print("[MASTER] Starting master node...")
     try:
         mb.receiver_loop()
