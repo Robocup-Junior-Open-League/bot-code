@@ -552,7 +552,7 @@ requestAnimationFrame(loop);
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass
+        pass  # suppress per-request access log
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -723,7 +723,15 @@ if __name__ == "__main__":
     threading.Thread(target=mb.receiver_loop, daemon=True, name="broker").start()
 
     print(f"[WEB-VIS] Serving at http://{HOST}:{PORT}/")
-    server = HTTPServer((HOST, PORT), _Handler)
+    class _Server(HTTPServer):
+        def handle_error(self, request, client_address):
+            import sys
+            if isinstance(sys.exc_info()[1],
+                          (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+                return  # normal client disconnect — not an error
+            super().handle_error(request, client_address)
+
+    server = _Server((HOST, PORT), _Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
