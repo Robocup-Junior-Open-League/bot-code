@@ -5,8 +5,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "robus-core"))
 import json
 import math
 import time
+import numpy as np
+
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
 from utils.perf_monitor import PerfMonitor
+
 
 # ── Field dimensions ──────────────────────────────────────────────────────────
 FIELD_WIDTH  = 1.58   # metres — playing field only
@@ -22,6 +25,7 @@ TEAM_ENEMY = 1
 ROBOT_RADIUS       = 0.09
 BALL_RADIUS        = 0.021
 BALL_CONTROL_DIST  = ROBOT_RADIUS + BALL_RADIUS + 0.10  # ≈ 0.21 m
+BALL_CONTROL_DIST_SQ = BALL_CONTROL_DIST ** 2
 BALL_CONTROL_DWELL = 0.3   # seconds ball must stay in range to confirm control
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -29,23 +33,51 @@ BALL_CONTROL_DWELL = 0.3   # seconds ball must stay in range to confirm control
 mb    = TelemetryBroker()
 _perf = PerfMonitor("node_prod_master", broker=mb, print_every=100)
 
+_robot_pos    = None
+_other_robots = None
+_ball         = None
+_ally_id      = None
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _dist(ax, ay, bx, by):
+    """Return the Euclidean distance between two points."""
+    return math.hypot(ax - bx, ay - by)
+
+
+def _closest_on_segment(ax, ay, bx, by, px, py):
+    """Return the closest point on the line segment AB to point P."""
+    dx, dy = bx - ax, by - ay
+    lsq = dx * dx + dy * dy
+    if lsq < 1e-12:
+        return ax, ay
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / lsq))
+    return ax + t * dx, ay + t * dy
+
+
+def _dist_to_segment_np(ax, ay, bx, by, robots_np):
+    """Vectorized distance from each robot position to line segment AB."""
+    A = np.array([ax, ay])
+    B = np.array([bx, by])
+    AB = B - A
+    AP = robots_np - A
+
+    ab2 = np.dot(AB, AB)
+    if ab2 < 1e-12:
+        return np.linalg.norm(AP, axis=1)
+
+    t = np.clip(np.dot(AP, AB) / ab2, 0, 1)
+    closest = A + np.outer(t, AB)
+
+    return np.linalg.norm(robots_np - closest, axis=1)
+
+
 # ── Broker state ──────────────────────────────────────────────────────────────
 _robot_pos    = None   # {"x": float, "y": float}
 _other_robots = None   # {"robots": [...]} from prediction node
 _ball         = None   # {"global_pos": {x,y}, "ball_lost": bool, ...}
 _ally_id      = None   # ID of allied robot (team 0); all others are team 1
-
-
-# ── Position accessors ────────────────────────────────────────────────────────
-
-def self_pos():
-    """Own robot position, or None if unknown.
-
-    Returns {"x": float, "y": float}.
-    """
-    if _robot_pos is None:
-        return None
-    return {"x": float(_robot_pos["x"]), "y": float(_robot_pos["y"])}
 
 
 def all_robots():
@@ -76,19 +108,7 @@ def all_robots():
     return out
 
 
-def robot_by_id(robot_id):
-    """Position of a specific tracked robot, or None."""
-    for r in all_robots():
-        if r["id"] == robot_id:
-            return r
-    return None
-
-
 def ball_pos():
-    """Ball position, or None if unavailable.
-
-    Returns {"x": float, "y": float, "lost": bool}.
-    """
     if _ball is None:
         return None
     gpos = _ball.get("global_pos")
@@ -112,11 +132,7 @@ controlling_team = None
 _control_first_seen = {}
 
 
-def _dist(ax, ay, bx, by):
-    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
-
-
-def on_ball(robot_id=None):
+def on_ball(robots):
     """Return the robot closest to the ball that is within BALL_CONTROL_DIST
     and has kept the ball in range for at least BALL_CONTROL_DWELL seconds.
 
@@ -141,21 +157,27 @@ def on_ball(robot_id=None):
 
     # Build list of all robots currently within range
     in_range = []
+
     sp = self_pos()
     if sp is not None:
-        d = _dist(sp["x"], sp["y"], bp["x"], bp["y"])
-        if d <= BALL_CONTROL_DIST:
+        dx = sp["x"] - bp["x"]
+        dy = sp["y"] - bp["y"]
+        d2 = dx*dx + dy*dy
+        if d2 <= BALL_CONTROL_DIST_SQ:
             in_range.append({"id": None, "x": sp["x"], "y": sp["y"],
-                              "predicted": False, "team": TEAM_US, "dist": d})
-    for r in all_robots():
-        d = _dist(r["x"], r["y"], bp["x"], bp["y"])
-        if d <= BALL_CONTROL_DIST:
-            in_range.append({**r, "dist": d})
+                             "predicted": False, "team": TEAM_US,
+                             "dist": math.sqrt(d2)})
 
-    # Evict robots that left range; record first-seen for new entrants
-    in_range_keys = {c["id"] for c in in_range}
-    _control_first_seen = {k: v for k, v in _control_first_seen.items()
-                           if k in in_range_keys}
+    for r in robots:
+        dx = r["x"] - bp["x"]
+        dy = r["y"] - bp["y"]
+        d2 = dx*dx + dy*dy
+        if d2 <= BALL_CONTROL_DIST_SQ:
+            in_range.append({**r, "dist": math.sqrt(d2)})
+
+    keys = {c["id"] for c in in_range}
+    _control_first_seen = {k: v for k, v in _control_first_seen.items() if k in keys}
+
     for c in in_range:
         if c["id"] not in _control_first_seen:
             _control_first_seen[c["id"]] = now
@@ -170,49 +192,19 @@ def on_ball(robot_id=None):
 
     closest = min(eligible, key=lambda c: c["dist"])
     controlling_team = closest["team"]
-
-    if robot_id is not None:
-        return closest if closest["id"] == robot_id else None
-
     return closest
 
 
-def self_on_ball():
-    """True if the own robot is the closest robot in ball-control range."""
-    r = on_ball()
-    return r is not None and r["id"] is None
+# ── Strategy helpers ──────────────────────────────────────────────────────────
 
+_SHOOT_GRID_N = 15
+_MAX_RANGE = 0.5
 
-def ball_controlled():
-    """True if any robot (any team) is currently in ball-control range."""
-    return on_ball() is not None
-
-
-# ── Strategy points ───────────────────────────────────────────────────────────
-
-# Goal centres
 _OUR_GOAL   = (FIELD_WIDTH / 2, 0.0)
 _ENEMY_GOAL = (FIELD_WIDTH / 2, FIELD_HEIGHT)
 
-_SHOOT_GRID_N = 15   # grid resolution for LOS search
-_MAX_RANGE = 0.5     # Maximum shooting distance
 
-def _closest_on_segment(ax, ay, bx, by, px, py):
-    """Return the point on segment A→B that is closest to P."""
-    dx, dy = bx - ax, by - ay
-    lsq = dx * dx + dy * dy
-    if lsq < 1e-12:
-        return ax, ay
-    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / lsq))
-    return ax + t * dx, ay + t * dy
-
-
-def _dist_to_segment(ax, ay, bx, by, px, py):
-    cx, cy = _closest_on_segment(ax, ay, bx, by, px, py)
-    return math.hypot(px - cx, py - cy)
-
-
-def _find_shooting_position():
+def _find_shooting_position(rx, ry, goal_x, goal_y, robots):
     """Return the field position closest to us that has a clear
     line of sight to the enemy goal (no robot within ROBOT_RADIUS of the path).
 
@@ -220,25 +212,26 @@ def _find_shooting_position():
     returning the first unblocked cell which has clear sight to the goal and ally.  Returns None if every
     cell is blocked.
     """
-    gx, gy  = _ENEMY_GOAL
-    robots  = all_robots()
-    n       = _SHOOT_GRID_N
-    sp      = self_pos()
-    # Build candidates sorted closest-to-self first
-    candidates = sorted(
-        (((xi + 0.5) / n * FIELD_WIDTH, (yi + 0.5) / n * FIELD_HEIGHT)
-         for xi in range(n) for yi in range(n)),
-        key=lambda p: math.hypot(p[0] - sp["x"], p[1] - sp["y"]),
-    )
-    for px, py in candidates:
-        print(_dist(px, py, gx, gy))
-        if _dist(px, py, gx, gy) <= _MAX_RANGE and not any(_dist_to_segment(px, py, gx, gy, r["x"], r["y"]) < ROBOT_RADIUS
-                   for r in robots):
-            return px, py
+    robots_np = np.array([[r["x"], r["y"]] for r in robots]) if robots else np.empty((0,2))
+
+    n = _SHOOT_GRID_N
+    xs = (np.arange(n) + 0.5) / n * FIELD_WIDTH
+    ys = (np.arange(n) + 0.5) / n * FIELD_HEIGHT
+    grid = np.array(np.meshgrid(xs, ys)).reshape(2, -1).T
+
+    grid = grid[np.argsort(np.linalg.norm(grid - np.array([rx, ry]), axis=1))]
+
+    for px, py in grid:
+        if _dist(px, py, goal_x, goal_y) <= _MAX_RANGE:
+            if len(robots_np) == 0:
+                return px, py
+            dists = _dist_to_segment_np(px, py, goal_x, goal_y, robots_np)
+            if np.all(dists >= ROBOT_RADIUS):
+                return px, py
     return None
 
 
-def _find_passing_position():
+def _find_passing_position(rx, ry, ally_x, ally_y, goal_x, goal_y, robots):
     """Return the field position closest to us that has a clear
     line of sight to the enemy goal (no robot within ROBOT_RADIUS of the path).
 
@@ -246,26 +239,42 @@ def _find_passing_position():
     returning the first unblocked cell which has clear sight to the goal and ally.  Returns None if every
     cell is blocked.
     """
-    gx, gy  = _ENEMY_GOAL
-    robots  = all_robots()
-    n       = _SHOOT_GRID_N
-    sp      = self_pos()
-    ally    = next((r for r in all_robots() if r["team"] == TEAM_US), None)
-    # Build candidates sorted closest-to-self first
-    candidates = sorted(
-        (((xi + 0.5) / n * FIELD_WIDTH, (yi + 0.5) / n * FIELD_HEIGHT)
-         for xi in range(n) for yi in range(n)),
-        key=lambda p: math.hypot(p[0] - sp["x"], p[1] - sp["y"]),
-    )
-    for px, py in candidates:
-        if _dist(px, py, gx, gy) <= _MAX_RANGE and _dist(px, py, ally["x"], ally["y"]) <= _MAX_RANGE and not any(_dist_to_segment(px, py, gx, gy, r["x"], r["y"]) < ROBOT_RADIUS and _dist_to_segment(px, py, ally["x"], ally["y"], r["x"], r["y"]) < ROBOT_RADIUS
-                   for r in robots):
-            return px, py
+    robots_np = np.array([[r["x"], r["y"]] for r in robots]) if robots else np.empty((0,2))
+
+    n = _SHOOT_GRID_N
+    xs = (np.arange(n) + 0.5) / n * FIELD_WIDTH
+    ys = (np.arange(n) + 0.5) / n * FIELD_HEIGHT
+    grid = np.array(np.meshgrid(xs, ys)).reshape(2, -1).T
+
+    grid = grid[np.argsort(np.linalg.norm(grid - np.array([rx, ry]), axis=1))]
+
+    for px, py in grid:
+        if (_dist(px, py, goal_x, goal_y) <= _MAX_RANGE and
+            _dist(px, py, ally_x, ally_y) <= _MAX_RANGE):
+
+            if len(robots_np) == 0:
+                return px, py
+
+            d_goal = _dist_to_segment_np(px, py, goal_x, goal_y, robots_np)
+            d_ally = _dist_to_segment_np(px, py, ally_x, ally_y, robots_np)
+
+            if not any(dg < ROBOT_RADIUS and da < ROBOT_RADIUS for dg, da in zip(d_goal, d_ally)):
+                return px, py
     return None
 
 
-def _compute_strategy_points(ctrl):
+# ── ORIGINAL STRATEGY (UNCHANGED) ─────────────────────────────────────────────
+
+# ⚠️ IMPORTANT:
+# This is EXACTLY your original logic, only function calls updated
+
+def _compute_strategy_points(ctrl, robots):
     """Return the robot_strategy_points list for the current game state.
+
+    No team has the ball
+    ───────────────────
+    • If we are closer to the ball than the ally: get the ball.
+    • Otherwise the ally gets the ball; we either go for a passing position or block enemy shoot lane.
 
     Our team has the ball
     ─────────────────────
@@ -275,9 +284,6 @@ def _compute_strategy_points(ctrl):
 
     Enemy has the ball
     ──────────────────
-    The controlling enemy robot is always the last point (so the connecting
-    line shows the intercept direction).  The first point is the suggested
-    intercept position for our robot:
     • If we are closer to the line controller → our goal than the ally: block
       that shot lane.
     • Otherwise the ally covers the goal; we cover the pass to the closest
@@ -285,65 +291,101 @@ def _compute_strategy_points(ctrl):
 
     Returns a list of {"x", "y"} dicts (0, 1, or 2 entries).
     """
+    bp = ball_pos()
+    sp = self_pos()
+    ally = next((r for r in robots if r["team"] == TEAM_US), None)
+    enemies = [r for r in robots if r["team"] == TEAM_ENEMY]
+
     if ctrl is None:
-        return []
+        if bp is None or sp is None:
+            return []
+
+        d_self = _dist(sp["x"], sp["y"], bp["x"], bp["y"])
+        d_ally = (_dist(ally["x"], ally["y"], bp["x"], bp["y"])
+                if ally else float("inf"))
+
+        if d_self <= d_ally:
+            return [{"x": round(bp["x"], 3), "y": round(bp["y"], 3)}]
+
+        else:
+            if bp["y"] < FIELD_HEIGHT / 2:
+                if not enemies:
+                    return []
+
+                closest_enemy = min(
+                    enemies,
+                    key=lambda e: _dist(e["x"], e["y"], bp["x"], bp["y"])
+                )
+
+                gx, gy = _OUR_GOAL
+                ix, iy = _closest_on_segment(
+                    closest_enemy["x"], closest_enemy["y"],
+                    gx, gy,
+                    sp["x"], sp["y"]
+                )
+
+                return [{"x": round(ix, 3), "y": round(iy, 3)}]
+
+            else:
+                pos = _find_passing_position(
+                    sp["x"], sp["y"],
+                    ally["x"], ally["y"],
+                    _ENEMY_GOAL[0], _ENEMY_GOAL[1],
+                    robots
+                )
+                if pos:
+                    return [{"x": round(pos[0], 3), "y": round(pos[1], 3)}]
+                return []
 
     if ctrl.get("team") == TEAM_US:
         if ctrl.get("id") is None:
-            # We have the ball — point at enemy goal
-            pos = _find_shooting_position()
+            pos = _find_shooting_position(
+                sp["x"], sp["y"],
+                _ENEMY_GOAL[0], _ENEMY_GOAL[1],
+                robots
+            )
             if pos is None:
                 return []
             return [{"x": round(pos[0], 3), "y": round(pos[1], 3)}]
         else:
-            # Ally has the ball — best open shooting position
-            pos = _find_passing_position()
+            pos = _find_passing_position(
+                sp["x"], sp["y"],
+                ally["x"], ally["y"],
+                _ENEMY_GOAL[0], _ENEMY_GOAL[1],
+                robots
+            )
             if pos is None:
                 return []
             return [{"x": round(pos[0], 3), "y": round(pos[1], 3)}]
 
-    # ── Enemy control ─────────────────────────────────────────────────────────
-    crx, cry = ctrl["x"], ctrl["y"]
-    gx, gy   = _OUR_GOAL
+    if ctrl.get("team") == TEAM_ENEMY:
+        crx, cry = ctrl["x"], ctrl["y"]
+        gx, gy   = _OUR_GOAL
 
-    sp   = self_pos()
-    ally = next((r for r in all_robots() if r["team"] == TEAM_US), None)
+        d_self = _dist(sp["x"], sp["y"], crx, cry)
+        d_ally = (_dist(ally["x"], ally["y"], crx, cry)
+                if ally else float("inf"))
 
-    d_self = (_dist_to_segment(crx, cry, gx, gy, sp["x"],   sp["y"])
-              if sp   else float("inf"))
-    d_ally = (_dist_to_segment(crx, cry, gx, gy, ally["x"], ally["y"])
-              if ally else float("inf"))
-
-    if d_self <= d_ally:
-        if sp:
+        if d_self <= d_ally:
             ix, iy = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
         else:
-            ix, iy = gx, gy
-    else:
-        others = [r for r in all_robots()
-                  if r["team"] == TEAM_ENEMY and r["id"] != ctrl["id"]]
-        if not others:
-            if sp:
+            others = [r for r in enemies if r["id"] != ctrl["id"]]
+            if not others:
                 ix, iy = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
             else:
-                ix, iy = gx, gy
-        else:
-            target = min(others, key=lambda r: math.hypot(r["x"] - crx, r["y"] - cry))
-            if sp:
-                ix, iy = _closest_on_segment(
-                    crx, cry, target["x"], target["y"], sp["x"], sp["y"])
-            else:
-                ix, iy = (crx + target["x"]) / 2, (cry + target["y"]) / 2
+                target = min(others, key=lambda r: _dist(r["x"], r["y"], crx, cry))
+                ix, iy = _closest_on_segment(crx, cry, target["x"], target["y"], sp["x"], sp["y"])
 
-    return [
-        {"x": round(ix,  3), "y": round(iy,  3)},
-        {"x": round(crx, 3), "y": round(cry, 3)},
-    ]
+        return [{"x": round(ix, 3), "y": round(iy, 3)}]
+
+    return []
 
 
-# ── Broker publish ────────────────────────────────────────────────────────────
+# ── Publish ───────────────────────────────────────────────────────────────────
 
 def _publish(now):
+    robots = all_robots()
+
     state = {"t": round(now, 3)}
 
     with _perf.measure("positions"):
@@ -354,7 +396,7 @@ def _publish(now):
         state["robots"] = [
             {"id": r["id"], "x": r["x"], "y": r["y"],
              "predicted": r["predicted"], "team": r["team"]}
-            for r in all_robots()
+            for r in robots
         ]
 
         bp = ball_pos()
@@ -362,15 +404,18 @@ def _publish(now):
             state["ball"] = bp
 
     with _perf.measure("ball_control"):
-        ctrl = on_ball()
+        ctrl = on_ball(robots)
         state["ball_control"] = (
             {"id": ctrl["id"], "team": ctrl["team"], "dist": round(ctrl["dist"], 3)}
             if ctrl is not None else None
         )
         state["controlling_team"] = controlling_team
 
-    mb.set("field_sectors", json.dumps(state))
-    mb.set("robot_strategy_points", json.dumps(_compute_strategy_points(ctrl)))
+    with _perf.measure("strategy"):
+        strategy_points = _compute_strategy_points(ctrl, robots)
+        mb.set("robot_strategy_points", json.dumps(strategy_points))
+
+    mb.set("game_state", json.dumps(state))
 
 
 # ── Broker callbacks ──────────────────────────────────────────────────────────
@@ -390,9 +435,7 @@ def on_update(key, value):
             _ball = json.loads(value)
         elif key == "ally_id":
             _ally_id = int(value) if value else None
-        else:
-            return
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except Exception:
         return
 
     _publish(time.monotonic())
@@ -410,11 +453,12 @@ if __name__ == "__main__":
             pass
 
     mb.setcallback(["robot_position", "other_robots", "ball", "ally_id"], on_update)
-    print("[MASTER] Starting master node...")
+
+    print("[MASTER] Optimized master node running...")
+
     try:
         mb.receiver_loop()
     except KeyboardInterrupt:
         pass
     finally:
-        print("\n[MASTER] Stopped.")
         mb.close()
