@@ -33,7 +33,8 @@ def _make_reader():
 _KP               = 0.8    # proportional gain
 _MIN_TURN_SPEED   = 30     # % — minimum power during a proportional turn
 _TOLERANCE_DEG    = 10.0   # degrees — dead-band (full forward / full reverse)
-_STEPS_FULL_SPEED = 100    # steps per frame at 100 % speed
+_MIN_STEP_DELAY   = 200    # minimum step delay in µs at 100% speed
+_MAX_STEP_DELAY   = 800    # minimum step delay in µs at 100% speed
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Broker state — updated by on_update()
@@ -103,9 +104,8 @@ def _motor_fields(left, right):
     """
     left  = max(-100, min(100, left))
     right = max(-100, min(100, right))
-
-    steps_l = abs(left)  * _STEPS_FULL_SPEED // 100
-    steps_r = abs(right) * _STEPS_FULL_SPEED // 100
+    steps_l = round(_MIN_STEP_DELAY + (_MAX_STEP_DELAY - _MIN_STEP_DELAY) * abs(left) / 100)
+    steps_r = round(_MIN_STEP_DELAY + (_MAX_STEP_DELAY - _MIN_STEP_DELAY) * abs(right) / 100)
     dir_l   = 1 if left  >= 0 else 0
     dir_r   = 1 if right >= 0 else 0
 
