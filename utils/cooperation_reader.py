@@ -36,6 +36,12 @@ try:
 except ImportError:
     _serial_available = False
 
+try:
+    import spidev as _spidev
+    _spi_available = True
+except ImportError:
+    _spi_available = False
+
 
 class BaseCooperationReader:
     """
@@ -68,11 +74,11 @@ class SerialCooperationReader(BaseCooperationReader):
     def __init__(self, port=None, baud=None):
         if not _serial_available:
             raise ImportError("pyserial is required for SerialCooperationReader")
-        self._port    = port or self.DEFAULT_PORT
-        self._baud    = baud or self.DEFAULT_BAUD
-        self._stop_ev = threading.Event()
-        self._thread  = None
-        self._ser     = None
+        self._port     = port or self.DEFAULT_PORT
+        self._baud     = baud or self.DEFAULT_BAUD
+        self._stop_ev  = threading.Event()
+        self._thread   = None
+        self._ser      = None
         self._ser_lock = threading.Lock()
 
     def start(self, on_frame):
@@ -132,6 +138,75 @@ class SerialCooperationReader(BaseCooperationReader):
                 self._ser = None
             ser.close()
             print("[COOP] Serial closed.")
+
+
+class SPICooperationReader(BaseCooperationReader):
+    """Reads newline-delimited JSON frames from an SPI bus.
+
+    Frames are clocked in by sending zero-filled dummy bytes.  Null bytes
+    (0x00) returned during SPI idle are stripped before buffering, as they
+    are not valid ASCII JSON characters.
+    """
+
+    DEFAULT_BUS    = 0
+    DEFAULT_DEVICE = 0
+    DEFAULT_SPEED  = 500_000  # Hz
+    DEFAULT_CHUNK  = 64       # bytes per xfer2 transaction
+
+    def __init__(self, bus=None, device=None, speed=None, chunk=None):
+        if not _spi_available:
+            raise ImportError("spidev is required for SPICooperationReader")
+        self._bus     = bus    if bus    is not None else self.DEFAULT_BUS
+        self._device  = device if device is not None else self.DEFAULT_DEVICE
+        self._speed   = speed  if speed  is not None else self.DEFAULT_SPEED
+        self._chunk   = chunk  if chunk  is not None else self.DEFAULT_CHUNK
+        self._stop_ev = threading.Event()
+        self._thread  = None
+
+    def start(self, on_frame):
+        self._stop_ev.clear()
+        self._thread = threading.Thread(
+            target=self._run, args=(on_frame,),
+            daemon=True, name="coop-spi",
+        )
+        self._thread.start()
+
+    def stop(self):
+        self._stop_ev.set()
+
+    def _run(self, on_frame):
+        try:
+            spi = _spidev.SpiDev()
+            spi.open(self._bus, self._device)
+            spi.max_speed_hz = self._speed
+            print(f"[COOP] SPI opened on bus {self._bus}, device {self._device}"
+                  f" at {self._speed} Hz.")
+        except Exception as e:
+            print(f"[COOP] Could not open SPI bus {self._bus},"
+                  f" device {self._device}: {e}")
+            return
+
+        buf = b""
+        try:
+            while not self._stop_ev.is_set():
+                chunk = bytes(b for b in spi.xfer2([0x00] * self._chunk)
+                              if b != 0x00)
+                if not chunk:
+                    continue
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line.decode("utf-8", errors="replace"))
+                        on_frame(data)
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        print(f"[COOP] Parse error: {e} — {line[:80]}")
+        finally:
+            spi.close()
+            print("[COOP] SPI closed.")
 
 
 class SimCooperationReader(BaseCooperationReader):
