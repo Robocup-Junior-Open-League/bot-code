@@ -22,7 +22,6 @@ SIM_SCAN_HZ      = 10             # complete lidar scan cycles per second
 #   wall to the playing-field border (white line).  No concave notch in outer wall.
 
 OUTER_MARGIN = 0.12   # m  (exported — used by other nodes)
-_GOAL_WIDTH  = 0.60   # m  inner goal width
 
 
 def _build_wall_segments(field_w, field_h):
@@ -43,25 +42,18 @@ def _build_wall_segments(field_w, field_h):
     All coordinates use the playing-field origin: (0,0) = bottom-left white-line
     corner.  The outer walls sit at −OUTER_MARGIN and field_w/h + OUTER_MARGIN.
     """
-    ox0    = -OUTER_MARGIN               # left / bottom outer wall
-    ox1    =  field_w + OUTER_MARGIN     # right outer wall
-    oy0    = -OUTER_MARGIN               # bottom outer wall
-    oy1    =  field_h + OUTER_MARGIN     # top outer wall
-    gx_min = (field_w - _GOAL_WIDTH) / 2
-    gx_max = (field_w + _GOAL_WIDTH) / 2
+    ox0 = -OUTER_MARGIN               # left / bottom outer wall
+    ox1 =  field_w + OUTER_MARGIN     # right outer wall
+    oy0 = -OUTER_MARGIN               # bottom outer wall
+    oy1 =  field_h + OUTER_MARGIN     # top outer wall
 
     return [
-        # Outer walls — complete rectangle
+        # Outer walls — complete rectangle; the goal opening has no additional
+        # obstructions at lidar height (goal side walls are below the beam).
         (False, ox0,  oy0, oy1),   # left
         (False, ox1,  oy0, oy1),   # right
         (True,  oy0,  ox0, ox1),   # bottom
         (True,  oy1,  ox0, ox1),   # top
-        # Goal side walls — bottom goal  (y ∈ [oy0, 0])
-        (False, gx_min, oy0, 0.0),
-        (False, gx_max, oy0, 0.0),
-        # Goal side walls — top goal     (y ∈ [field_h, oy1])
-        (False, gx_min, field_h, oy1),
-        (False, gx_max, field_h, oy1),
     ]
 
 

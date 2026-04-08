@@ -14,7 +14,7 @@ except ImportError as e:
         serial = None
         _serial_import_error = e
 
-PORT = '/dev/ttyAMA0'   # UART0 on Raspberry Pi
+PORT = '/dev/ttyS0'   # UART0 on Raspberry Pi
 BAUD = 460800
 
 _PACKET_SIZE = 5

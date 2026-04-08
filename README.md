@@ -41,12 +41,28 @@ Linux:
 
 ```bash
 cd bot-code
-source ./robus_core/setup/start.sh
+bash ./robus_core/start.sh
 ```
 
 Windows:
 
 ```bash
 cd bot-code
-robus_core\setup\start.bat
+robus_core\start.bat
+```
+
+To stop all nodes, run the following command:
+
+Linux:
+
+```bash
+cd bot-code
+bash ./robus_core/stop.sh
+```
+
+Windows:
+
+```bash
+cd bot-code
+robus_core\stop.bat
 ```

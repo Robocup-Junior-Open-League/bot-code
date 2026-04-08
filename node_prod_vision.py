@@ -175,6 +175,9 @@ class _SimBall:
     MARGIN   = BALL_R + 0.02
     SPEED    = 0.6
 
+    CAPTURE_DURATION = 10.0   # seconds the ball stays locked to the robot
+    CAPTURE_CHANCE   = 0.5    # probability of capture on collision
+
     def __init__(self):
         import random
         self._focal_px = (RES_WIDTH / 2.0) / math.tan(math.radians(FOV_DEG / 2.0))
@@ -186,6 +189,9 @@ class _SimBall:
         _hsv = np.array([[[15, 200, 220]]], dtype=np.uint8)
         bgr  = cv2.cvtColor(_hsv, cv2.COLOR_HSV2BGR)[0, 0]
         self._orange_bgr = (int(bgr[0]), int(bgr[1]), int(bgr[2]))
+        self._captured_robot_idx = None   # index into _all_robots()
+        self._captured_offset    = (0.0, 0.0)
+        self._capture_end_t      = 0.0
 
     def _all_robots(self):
         state = _sim_state
@@ -229,34 +235,54 @@ class _SimBall:
         return False
 
     def render(self):
+        import random
         now = time.monotonic()
         dt  = now - self._last_t
         self._last_t = now
 
-        self._x += self._vx * dt
-        self._y += self._vy * dt
+        robots = self._all_robots()
 
-        if self._x < self.MARGIN:
-            self._x  = self.MARGIN;              self._vx =  abs(self._vx)
-        elif self._x > self.FIELD_W - self.MARGIN:
-            self._x  = self.FIELD_W - self.MARGIN; self._vx = -abs(self._vx)
-        if self._y < self.MARGIN:
-            self._y  = self.MARGIN;              self._vy =  abs(self._vy)
-        elif self._y > self.FIELD_H - self.MARGIN:
-            self._y  = self.FIELD_H - self.MARGIN; self._vy = -abs(self._vy)
+        # ── Capture mode: ball locked to a robot ─────────────────────────────
+        if self._captured_robot_idx is not None:
+            if now < self._capture_end_t and self._captured_robot_idx < len(robots):
+                rx, ry   = robots[self._captured_robot_idx]
+                self._x  = rx + self._captured_offset[0]
+                self._y  = ry + self._captured_offset[1]
+            else:
+                # Release — ball keeps its current position; velocity already set
+                self._captured_robot_idx = None
+        else:
+            # ── Normal physics ────────────────────────────────────────────────
+            self._x += self._vx * dt
+            self._y += self._vy * dt
 
-        sep = ROBOT_RADIUS + self.BALL_R
-        for rx, ry in self._all_robots():
-            dx, dy = self._x - rx, self._y - ry
-            dist   = math.hypot(dx, dy)
-            if 0 < dist < sep:
-                nx, ny    = dx / dist, dy / dist
-                self._x   = rx + nx * sep
-                self._y   = ry + ny * sep
-                dot        = self._vx * nx + self._vy * ny
-                if dot < 0:
-                    self._vx -= 2 * dot * nx
-                    self._vy -= 2 * dot * ny
+            if self._x < self.MARGIN:
+                self._x  = self.MARGIN;              self._vx =  abs(self._vx)
+            elif self._x > self.FIELD_W - self.MARGIN:
+                self._x  = self.FIELD_W - self.MARGIN; self._vx = -abs(self._vx)
+            if self._y < self.MARGIN:
+                self._y  = self.MARGIN;              self._vy =  abs(self._vy)
+            elif self._y > self.FIELD_H - self.MARGIN:
+                self._y  = self.FIELD_H - self.MARGIN; self._vy = -abs(self._vy)
+
+            sep = ROBOT_RADIUS + self.BALL_R
+            for i, (rx, ry) in enumerate(robots):
+                dx, dy = self._x - rx, self._y - ry
+                dist   = math.hypot(dx, dy)
+                if 0 < dist < sep:
+                    nx, ny = dx / dist, dy / dist
+                    self._x = rx + nx * sep
+                    self._y = ry + ny * sep
+                    dot = self._vx * nx + self._vy * ny
+                    if dot < 0:
+                        self._vx -= 2 * dot * nx
+                        self._vy -= 2 * dot * ny
+                    # 50% chance: lock ball to this robot for 10 s
+                    if random.random() < self.CAPTURE_CHANCE:
+                        self._captured_robot_idx = i
+                        self._captured_offset    = (self._x - rx, self._y - ry)
+                        self._capture_end_t      = now + self.CAPTURE_DURATION
+                    break  # one collision per frame
 
         if _robot_pos is not None and _imu_pitch is not None:
             heading_rad = math.radians(_imu_pitch)

@@ -23,6 +23,7 @@ BALL_VEL_HISTORY_MIN = 3
 BALL_VEL_MIN_DT      = 0.05   # seconds
 MAX_BALL_SPEED       = 3.0    # m/s
 MAX_ALLY_BALL_AGE    = 0.5    # seconds — ignore ally ball data older than this
+BALL_CAPTURE_DIST    = 0.15   # metres — ball this close to a robot is considered held
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,8 @@ _last_ball_vy      = 0.0
 _hidden_state      = None
 _hidden_state_t    = None
 _ball_lost         = False
+_ball_captured_id     = None   # ID of the robot currently holding the ball, or None
+_ball_captured_offset = None   # (dx, dy) ball relative to that robot at moment of capture
 
 # ── Ally ball state ───────────────────────────────────────────────────────────
 _ally_ball_pos  = None   # ally's detected ball {"x","y","confidence"} or None
@@ -159,6 +162,7 @@ def on_update(key, value):
     global _vel_history, _vel_history_dirty, _vel_last_t, _last_detection_t
     global _last_ball_vx, _last_ball_vy
     global _hidden_state, _hidden_state_t, _ball_lost
+    global _ball_captured_id, _ball_captured_offset
     global _ally_ball_pos, _ally_ball_pred, _ally_ball_t
 
     if value is None:
@@ -272,11 +276,13 @@ def on_update(key, value):
 
             # ── Detection logic (uses best_pos) ──────────────────────────
             if best_pos is not None:
-                _last_detection_t = now_t
-                _ball_lost        = False
-                _hidden_state     = [best_pos["x"], best_pos["y"],
-                                     _last_ball_vx, _last_ball_vy]
-                _hidden_state_t   = None
+                _last_detection_t    = now_t
+                _ball_lost           = False
+                _ball_captured_id    = None   # ball is visible — release any capture
+                _ball_captured_offset = None
+                _hidden_state        = [best_pos["x"], best_pos["y"],
+                                        _last_ball_vx, _last_ball_vy]
+                _hidden_state_t      = None
 
                 if now_t - _vel_last_t >= BALL_VEL_MIN_DT:
                     ok = True
@@ -312,28 +318,64 @@ def on_update(key, value):
 
             if best_pos is None and _hidden_state is not None:
                 if _ball_lost or _in_camera_fov(_hidden_state[0], _hidden_state[1]):
-                    _ball_lost = True
-                    pub_vx = pub_vy = 0.0
+                    # Ball is in FOV but not seen → truly lost, stop predicting
+                    _ball_lost        = True
+                    _ball_captured_id = None
+                    pub_vx = pub_vy   = 0.0
                 else:
-                    # Ally prediction can nudge hidden_state while we can't see it
-                    if ally_fresh and _ally_ball_pred is not None:
-                        ap = _ally_ball_pred
-                        _hidden_state[0] = (_hidden_state[0] + ap["x"]) / 2
-                        _hidden_state[1] = (_hidden_state[1] + ap["y"]) / 2
-                    if _hidden_state_t is None:
-                        _hidden_state_t = now_t
-                    else:
-                        dt_frame = now_t - _hidden_state_t
-                        if dt_frame > 0:
-                            hx, hy, hvx, hvy = _extrapolate_ball(
-                                _hidden_state[0], _hidden_state[1],
-                                _hidden_state[2], _hidden_state[3],
-                                dt_frame, robots=_robot_positions_cache,
-                            )
-                            _hidden_state   = [hx, hy, hvx, hvy]
+                    # ── Capture detection (first frame of loss only) ───────
+                    if _hidden_state_t is None and _ball_captured_id is None:
+                        bx, by = _hidden_state[0], _hidden_state[1]
+                        best_rid, best_dist = None, BALL_CAPTURE_DIST + 1
+                        for rid, last in _robot_last.items():
+                            d = math.hypot(bx - last["x"], by - last["y"])
+                            if d < best_dist:
+                                best_dist, best_rid = d, rid
+                        if best_dist <= BALL_CAPTURE_DIST:
+                            _ball_captured_id     = best_rid
+                            last = _robot_last[best_rid]
+                            _ball_captured_offset = (bx - last["x"], by - last["y"])
+
+                    # ── Track captured ball with its robot ────────────────
+                    if _ball_captured_id is not None:
+                        last = _robot_last.get(_ball_captured_id)
+                        if last is not None:
+                            dt = now_t - last["t"]
+                            rx, ry = _predict_with_bounce(
+                                last["x"], last["y"], last["vx"], last["vy"], dt)
+                            hx = max(0.0, min(FIELD_WIDTH,  rx + _ball_captured_offset[0]))
+                            hy = max(0.0, min(FIELD_HEIGHT, ry + _ball_captured_offset[1]))
+                            _hidden_state = [hx, hy, last["vx"], last["vy"]]
+                            if _hidden_state_t is None:
+                                _hidden_state_t = now_t
+                            pub_vx, pub_vy = last["vx"], last["vy"]
+                        else:
+                            # Captured robot gone — release and fall through to physics
+                            _ball_captured_id     = None
+                            _ball_captured_offset = None
+
+                    # ── Physics extrapolation (no active capture) ─────────
+                    if _ball_captured_id is None:
+                        # Ally prediction can nudge hidden_state
+                        if ally_fresh and _ally_ball_pred is not None:
+                            ap = _ally_ball_pred
+                            _hidden_state[0] = (_hidden_state[0] + ap["x"]) / 2
+                            _hidden_state[1] = (_hidden_state[1] + ap["y"]) / 2
+                        if _hidden_state_t is None:
                             _hidden_state_t = now_t
-                    pub_vx = _hidden_state[2]
-                    pub_vy = _hidden_state[3]
+                        else:
+                            dt_frame = now_t - _hidden_state_t
+                            if dt_frame > 0:
+                                hx, hy, hvx, hvy = _extrapolate_ball(
+                                    _hidden_state[0], _hidden_state[1],
+                                    _hidden_state[2], _hidden_state[3],
+                                    dt_frame, robots=_robot_positions_cache,
+                                )
+                                _hidden_state   = [hx, hy, hvx, hvy]
+                                _hidden_state_t = now_t
+                        pub_vx = _hidden_state[2]
+                        pub_vy = _hidden_state[3]
+
                 hidden_pos = {"x": round(_hidden_state[0], 3),
                               "y": round(_hidden_state[1], 3)}
 
