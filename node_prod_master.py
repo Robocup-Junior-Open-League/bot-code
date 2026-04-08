@@ -337,13 +337,40 @@ def _compute_strategy_points(ctrl, robots):
                     enemies,
                     key=lambda e: _dist(e["x"], e["y"], bp["x"], bp["y"])
                 )
+                d_closest_enemy = _dist(
+                    closest_enemy["x"], closest_enemy["y"], bp["x"], bp["y"]
+                )
 
                 gx, gy = _OUR_GOAL
-                ix, iy = _closest_on_segment(
-                    closest_enemy["x"], closest_enemy["y"],
-                    gx, gy,
-                    sp["x"], sp["y"]
-                )
+
+                if d_closest_enemy < d_ally:
+                    # Enemies are closest to ball — block their passing lane
+                    others_enemy = [r for r in enemies if r["id"] != closest_enemy["id"]]
+                    if others_enemy:
+                        target = min(
+                            others_enemy,
+                            key=lambda r: _dist(
+                                r["x"], r["y"], closest_enemy["x"], closest_enemy["y"]
+                            ),
+                        )
+                        ix, iy = _closest_on_segment(
+                            closest_enemy["x"], closest_enemy["y"],
+                            target["x"], target["y"],
+                            sp["x"], sp["y"],
+                        )
+                    else:
+                        ix, iy = _closest_on_segment(
+                            closest_enemy["x"], closest_enemy["y"],
+                            gx, gy,
+                            sp["x"], sp["y"],
+                        )
+                else:
+                    ix, iy = _closest_on_segment(
+                        closest_enemy["x"], closest_enemy["y"],
+                        gx, gy,
+                        sp["x"], sp["y"],
+                    )
+
                 ix, iy = _move_along_line(gx, gy, ix, iy, _MAX_RANGE)
                 ix, iy = _move_along_line(sp["x"], sp["y"], ix, iy, 2 * ROBOT_RADIUS)
 
@@ -393,14 +420,26 @@ def _compute_strategy_points(ctrl, robots):
     if ctrl.get("team") == TEAM_ENEMY:
         crx, cry = ctrl["x"], ctrl["y"]
         gx, gy   = _OUR_GOAL
+        others   = [r for r in enemies if r["id"] != ctrl["id"]]
 
-        # First strategy point: block the goal shot lane
+        d_self = _dist(sp["x"], sp["y"], crx, cry)
+        d_ally = (_dist(ally["x"], ally["y"], crx, cry) if ally else float("inf"))
+
+        if d_self > d_ally and others:
+            # Ally is closer to the controller — we block their passing lane only
+            target = min(others, key=lambda r: _dist(r["x"], r["y"], crx, cry))
+            ix, iy = _closest_on_segment(
+                crx, cry, target["x"], target["y"], sp["x"], sp["y"]
+            )
+            ix, iy = _move_along_line(gx, gy, ix, iy, _MAX_RANGE)
+            ix, iy = _move_along_line(sp["x"], sp["y"], ix, iy, 2 * ROBOT_RADIUS)
+            return [{"x": round(ix, 3), "y": round(iy, 3)}]
+
+        # We are closer (or no pass target) — block both goal shot and pass lane
         ix1, iy1 = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
         ix1, iy1 = _move_along_line(gx, gy, ix1, iy1, _MAX_RANGE)
         ix1, iy1 = _move_along_line(sp["x"], sp["y"], ix1, iy1, 2 * ROBOT_RADIUS)
 
-        # Second strategy point: block the pass lane to nearest other enemy
-        others = [r for r in enemies if r["id"] != ctrl["id"]]
         if others:
             target = min(others, key=lambda r: _dist(r["x"], r["y"], crx, cry))
             ix2, iy2 = _closest_on_segment(
