@@ -90,7 +90,11 @@ def on_sim_frame(data):
 
 def _build_outgoing_frame():
     """Build a cooperation frame from our robot's current state."""
-    frame = {"type": "communication"}
+    frame = {
+        "l":  {"s": 0, "d": 0},
+        "r":  {"s": 0, "d": 0},
+        "k":  {"s": 0, "d": 0},
+    }
 
     if _own_pos is not None:
         frame["main_robot_pos"] = {
@@ -144,8 +148,8 @@ def _build_outgoing_frame():
 
 
 def _send_loop(reader_ref):
-    """Periodically transmit our robot's state over serial at ~10 Hz."""
-    interval = 0.1
+    """Periodically transmit our robot's state at 20 Hz (every 50 ms)."""
+    interval = 0.05
     while True:
         frame = _build_outgoing_frame()
         reader_ref[0].send(frame)

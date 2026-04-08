@@ -141,25 +141,27 @@ class SerialCooperationReader(BaseCooperationReader):
 
 
 class SPICooperationReader(BaseCooperationReader):
-    """Reads newline-delimited JSON frames from an SPI bus.
+    """Reads/writes newline-delimited JSON frames over SPI.
 
-    Frames are clocked in by sending zero-filled dummy bytes.  Null bytes
-    (0x00) returned during SPI idle are stripped before buffering, as they
-    are not valid ASCII JSON characters.
+    Matches the ESP32 Drive-Cycle Controller protocol:
+      - Fixed BUFFER_SIZE-byte transfers (zero-padded), mode 0.
+      - Outgoing frames are padded to BUFFER_SIZE before xfer2.
+      - Incoming payload ends at the first null byte; null bytes are
+        stripped from the read buffer before JSON parsing.
     """
 
     DEFAULT_BUS    = 0
     DEFAULT_DEVICE = 0
-    DEFAULT_SPEED  = 500_000  # Hz
-    DEFAULT_CHUNK  = 64       # bytes per xfer2 transaction
+    DEFAULT_SPEED  = 1_000_000  # Hz — matches ESP32 controller
+    BUFFER_SIZE    = 128        # bytes per xfer2 transaction
+    SPI_MODE       = 0b00
 
-    def __init__(self, bus=None, device=None, speed=None, chunk=None):
+    def __init__(self, bus=None, device=None, speed=None):
         if not _spi_available:
             raise ImportError("spidev is required for SPICooperationReader")
         self._bus      = bus    if bus    is not None else self.DEFAULT_BUS
         self._device   = device if device is not None else self.DEFAULT_DEVICE
         self._speed    = speed  if speed  is not None else self.DEFAULT_SPEED
-        self._chunk    = chunk  if chunk  is not None else self.DEFAULT_CHUNK
         self._stop_ev  = threading.Event()
         self._thread   = None
         self._spi      = None
@@ -176,16 +178,22 @@ class SPICooperationReader(BaseCooperationReader):
     def stop(self):
         self._stop_ev.set()
 
+    def _pad(self, payload: bytes) -> list:
+        """Zero-pad *payload* to BUFFER_SIZE."""
+        if len(payload) > self.BUFFER_SIZE:
+            raise ValueError(f"[COOP] Payload too large: {len(payload)} bytes")
+        return list(payload) + [0] * (self.BUFFER_SIZE - len(payload))
+
     def send(self, data: dict):
-        """Write a JSON frame (newline-terminated) to the SPI bus."""
+        """Write a JSON frame (zero-padded to BUFFER_SIZE) to the SPI bus."""
         with self._spi_lock:
             spi = self._spi
         if spi is None:
             return
         try:
-            line = (json.dumps(data, separators=(",", ":")) + "\n").encode("utf-8")
+            payload = json.dumps(data, separators=(",", ":")).encode("utf-8")
             with self._spi_lock:
-                spi.xfer2(list(line))
+                spi.xfer2(self._pad(payload), self._speed)
         except Exception as e:
             print(f"[COOP] Send error: {e}")
 
@@ -193,7 +201,10 @@ class SPICooperationReader(BaseCooperationReader):
         try:
             spi = _spidev.SpiDev()
             spi.open(self._bus, self._device)
-            spi.max_speed_hz = self._speed
+            spi.max_speed_hz  = self._speed
+            spi.mode          = self.SPI_MODE
+            spi.bits_per_word = 8
+            spi.lsbfirst      = False
             print(f"[COOP] SPI opened on bus {self._bus}, device {self._device}"
                   f" at {self._speed} Hz.")
         except Exception as e:
@@ -208,7 +219,8 @@ class SPICooperationReader(BaseCooperationReader):
         try:
             while not self._stop_ev.is_set():
                 with self._spi_lock:
-                    chunk = bytes(b for b in spi.xfer2([0x00] * self._chunk)
+                    chunk = bytes(b for b in spi.xfer2([0x00] * self.BUFFER_SIZE,
+                                                       self._speed)
                                   if b != 0x00)
                 if not chunk:
                     continue
