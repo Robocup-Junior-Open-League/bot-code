@@ -156,12 +156,14 @@ class SPICooperationReader(BaseCooperationReader):
     def __init__(self, bus=None, device=None, speed=None, chunk=None):
         if not _spi_available:
             raise ImportError("spidev is required for SPICooperationReader")
-        self._bus     = bus    if bus    is not None else self.DEFAULT_BUS
-        self._device  = device if device is not None else self.DEFAULT_DEVICE
-        self._speed   = speed  if speed  is not None else self.DEFAULT_SPEED
-        self._chunk   = chunk  if chunk  is not None else self.DEFAULT_CHUNK
-        self._stop_ev = threading.Event()
-        self._thread  = None
+        self._bus      = bus    if bus    is not None else self.DEFAULT_BUS
+        self._device   = device if device is not None else self.DEFAULT_DEVICE
+        self._speed    = speed  if speed  is not None else self.DEFAULT_SPEED
+        self._chunk    = chunk  if chunk  is not None else self.DEFAULT_CHUNK
+        self._stop_ev  = threading.Event()
+        self._thread   = None
+        self._spi      = None
+        self._spi_lock = threading.Lock()
 
     def start(self, on_frame):
         self._stop_ev.clear()
@@ -173,6 +175,19 @@ class SPICooperationReader(BaseCooperationReader):
 
     def stop(self):
         self._stop_ev.set()
+
+    def send(self, data: dict):
+        """Write a JSON frame (newline-terminated) to the SPI bus."""
+        with self._spi_lock:
+            spi = self._spi
+        if spi is None:
+            return
+        try:
+            line = (json.dumps(data, separators=(",", ":")) + "\n").encode("utf-8")
+            with self._spi_lock:
+                spi.xfer2(list(line))
+        except Exception as e:
+            print(f"[COOP] Send error: {e}")
 
     def _run(self, on_frame):
         try:
@@ -186,11 +201,15 @@ class SPICooperationReader(BaseCooperationReader):
                   f" device {self._device}: {e}")
             return
 
+        with self._spi_lock:
+            self._spi = spi
+
         buf = b""
         try:
             while not self._stop_ev.is_set():
-                chunk = bytes(b for b in spi.xfer2([0x00] * self._chunk)
-                              if b != 0x00)
+                with self._spi_lock:
+                    chunk = bytes(b for b in spi.xfer2([0x00] * self._chunk)
+                                  if b != 0x00)
                 if not chunk:
                     continue
                 buf += chunk
@@ -205,6 +224,8 @@ class SPICooperationReader(BaseCooperationReader):
                     except (json.JSONDecodeError, UnicodeDecodeError) as e:
                         print(f"[COOP] Parse error: {e} — {line[:80]}")
         finally:
+            with self._spi_lock:
+                self._spi = None
             spi.close()
             print("[COOP] SPI closed.")
 
