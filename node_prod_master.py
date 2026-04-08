@@ -423,7 +423,8 @@ def _publish(now):
 
     with _perf.measure("strategy"):
         strategy_points = _compute_strategy_points(ctrl, robots)
-        mb.set("robot_strategy_points", json.dumps(strategy_points))
+        if len(strategy_points) > 0:
+            mb.set("robot_strategy_points", json.dumps(strategy_points))
 
     mb.set("game_state", json.dumps(state))
 
