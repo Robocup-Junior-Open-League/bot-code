@@ -73,6 +73,17 @@ def _dist_to_segment_np(ax, ay, bx, by, robots_np):
     return np.linalg.norm(robots_np - closest, axis=1)
 
 
+def _move_along_line(ax, ay, bx, by, min_dist):
+    """Move (bx, by) along the line from (ax, ay) toward (bx, by) so that
+    the result is at least min_dist from (ax, ay).
+    Returns (bx, by) unchanged if already far enough or if a == b."""
+    d = math.hypot(bx - ax, by - ay)
+    if d >= min_dist or d < 1e-9:
+        return bx, by
+    ratio = min_dist / d
+    return ax + (bx - ax) * ratio, ay + (by - ay) * ratio
+
+
 # ── Broker state ──────────────────────────────────────────────────────────────
 _robot_pos    = None   # {"x": float, "y": float}
 _other_robots = None   # {"robots": [...]} from prediction node
@@ -333,6 +344,8 @@ def _compute_strategy_points(ctrl, robots):
                     gx, gy,
                     sp["x"], sp["y"]
                 )
+                ix, iy = _move_along_line(gx, gy, ix, iy, _MAX_RANGE)
+                ix, iy = _move_along_line(sp["x"], sp["y"], ix, iy, 2 * ROBOT_RADIUS)
 
                 return [{"x": round(ix, 3), "y": round(iy, 3)}]
 
@@ -344,7 +357,10 @@ def _compute_strategy_points(ctrl, robots):
                     robots
                 )
                 if pos:
-                    return [{"x": round(pos[0], 3), "y": round(pos[1], 3)}]
+                    px, py = _move_along_line(
+                        _ENEMY_GOAL[0], _ENEMY_GOAL[1], pos[0], pos[1], _MAX_RANGE
+                    )
+                    return [{"x": round(px, 3), "y": round(py, 3)}]
                 return []
 
     if ctrl.get("team") == TEAM_US:
@@ -356,7 +372,10 @@ def _compute_strategy_points(ctrl, robots):
             )
             if pos is None:
                 return []
-            return [{"x": round(pos[0], 3), "y": round(pos[1], 3)}]
+            px, py = _move_along_line(
+                _ENEMY_GOAL[0], _ENEMY_GOAL[1], pos[0], pos[1], _MAX_RANGE
+            )
+            return [{"x": round(px, 3), "y": round(py, 3)}]
         else:
             pos = _find_passing_position(
                 sp["x"], sp["y"],
@@ -366,27 +385,35 @@ def _compute_strategy_points(ctrl, robots):
             )
             if pos is None:
                 return []
-            return [{"x": round(pos[0], 3), "y": round(pos[1], 3)}]
+            px, py = _move_along_line(
+                _ENEMY_GOAL[0], _ENEMY_GOAL[1], pos[0], pos[1], _MAX_RANGE
+            )
+            return [{"x": round(px, 3), "y": round(py, 3)}]
 
     if ctrl.get("team") == TEAM_ENEMY:
         crx, cry = ctrl["x"], ctrl["y"]
         gx, gy   = _OUR_GOAL
 
-        d_self = _dist(sp["x"], sp["y"], crx, cry)
-        d_ally = (_dist(ally["x"], ally["y"], crx, cry)
-                if ally else float("inf"))
+        # First strategy point: block the goal shot lane
+        ix1, iy1 = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
+        ix1, iy1 = _move_along_line(gx, gy, ix1, iy1, _MAX_RANGE)
+        ix1, iy1 = _move_along_line(sp["x"], sp["y"], ix1, iy1, 2 * ROBOT_RADIUS)
 
-        if d_self <= d_ally:
-            ix, iy = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
-        else:
-            others = [r for r in enemies if r["id"] != ctrl["id"]]
-            if not others:
-                ix, iy = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
-            else:
-                target = min(others, key=lambda r: _dist(r["x"], r["y"], crx, cry))
-                ix, iy = _closest_on_segment(crx, cry, target["x"], target["y"], sp["x"], sp["y"])
+        # Second strategy point: block the pass lane to nearest other enemy
+        others = [r for r in enemies if r["id"] != ctrl["id"]]
+        if others:
+            target = min(others, key=lambda r: _dist(r["x"], r["y"], crx, cry))
+            ix2, iy2 = _closest_on_segment(
+                crx, cry, target["x"], target["y"], sp["x"], sp["y"]
+            )
+            ix2, iy2 = _move_along_line(gx, gy, ix2, iy2, _MAX_RANGE)
+            ix2, iy2 = _move_along_line(sp["x"], sp["y"], ix2, iy2, 2 * ROBOT_RADIUS)
+            return [
+                {"x": round(ix1, 3), "y": round(iy1, 3)},
+                {"x": round(ix2, 3), "y": round(iy2, 3)},
+            ]
 
-        return [{"x": round(ix, 3), "y": round(iy, 3)}]
+        return [{"x": round(ix1, 3), "y": round(iy1, 3)}]
 
     return []
 
