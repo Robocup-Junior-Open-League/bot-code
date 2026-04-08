@@ -7,7 +7,7 @@ import time
 import threading
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
 from utils.perf_monitor import PerfMonitor
-from utils.cooperation_reader import SerialCooperationReader, SimCooperationReader
+from utils.cooperation_reader import SPICooperationReader, SimCooperationReader
 
 # ── Reader factory ────────────────────────────────────────────────────────────
 # To swap the transport layer, return a different BaseCooperationReader here.
@@ -18,12 +18,13 @@ _perf = PerfMonitor("node_prod_communication", broker=mb, print_every=100)
 
 
 def _make_reader():
-    if COOP_SIM_REPLACE and not os.path.exists(SerialCooperationReader.DEFAULT_PORT):
+    spi_path = f"/dev/spidev{SPICooperationReader.DEFAULT_BUS}.{SPICooperationReader.DEFAULT_DEVICE}"
+    if COOP_SIM_REPLACE and not os.path.exists(spi_path):
         return SimCooperationReader(
             get_sim_state=lambda: _sim_state,
             get_ball_sim=lambda: _ball_sim_pos,
         )
-    return SerialCooperationReader()
+    return SPICooperationReader()
 
 
 # Broker state — updated by on_update()
