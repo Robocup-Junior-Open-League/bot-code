@@ -88,7 +88,7 @@ _sim_state = None
 def _process_frame(frame):
     """Das Gehirn der Bildverarbeitung (aus dem Kalibrierungsskript übernommen)."""
     # 🚫 ZUSCHAUER-ZENSUR
-    if CENSOR_TOP_HEIGHT_PX > 0:
+    if CENSOR_TOP_HEIGHT_PX > 0 and frame is not None:
         frame[0:CENSOR_TOP_HEIGHT_PX, :] = (0, 0, 0)
 
     hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -138,9 +138,8 @@ def _process_frame(frame):
 
 
 class _SimBall:
-    """Der geniale Digital Twin von eurem Projekt."""
-    FIELD_W  = 1.82
-    FIELD_H  = 2.43
+    FIELD_W  = 1.58
+    FIELD_H  = 2.19
     BALL_R   = BALL_RADIUS_MM / 1000.0
     MARGIN   = BALL_R + 0.02
     SPEED    = 0.6
@@ -165,16 +164,19 @@ class _SimBall:
 
     def _all_robots(self):
         state = _sim_state
-        if state is None: return []
+        if state is None:
+            return []
         robots = []
         r = state.get("robot")
-        if r: robots.append((float(r[0]), float(r[1])))
+        if r:
+            robots.append((float(r[0]), float(r[1])))
         robots += [(float(p[0]), float(p[1])) for p in state.get("obstacles", [])]
         return robots
 
     def _obstacle_robots(self):
         state = _sim_state
-        if state is None: return []
+        if state is None:
+            return []
         return [(float(p[0]), float(p[1])) for p in state.get("obstacles", [])]
 
     def _random_position(self):
@@ -191,11 +193,14 @@ class _SimBall:
     def _is_occluded(self, cx, cy, bx, by):
         dx, dy     = bx - cx, by - cy
         seg_len_sq = dx * dx + dy * dy
-        if seg_len_sq < 1e-12: return False
+        if seg_len_sq < 1e-12:
+            return False
         for rx, ry in self._obstacle_robots():
-            t = max(0.0, min(1.0, ((rx - cx) * dx + (ry - cy) * dy) / seg_len_sq))
+            t = max(0.0, min(1.0,
+                ((rx - cx) * dx + (ry - cy) * dy) / seg_len_sq))
             closest_dist = math.hypot(cx + t * dx - rx, cy + t * dy - ry)
-            if closest_dist < ROBOT_RADIUS: return True
+            if closest_dist < ROBOT_RADIUS:
+                return True
         return False
 
     def render(self):
@@ -204,26 +209,49 @@ class _SimBall:
         dt  = now - self._last_t
         self._last_t = now
 
-        self._x += self._vx * dt
-        self._y += self._vy * dt
+        robots = self._all_robots()
 
-        if self._x < self.MARGIN: self._x = self.MARGIN; self._vx = abs(self._vx)
-        elif self._x > self.FIELD_W - self.MARGIN: self._x = self.FIELD_W - self.MARGIN; self._vx = -abs(self._vx)
-        if self._y < self.MARGIN: self._y = self.MARGIN; self._vy = abs(self._vy)
-        elif self._y > self.FIELD_H - self.MARGIN: self._y = self.FIELD_H - self.MARGIN; self._vy = -abs(self._vy)
+        # ── Capture mode: ball locked to a robot ─────────────────────────────
+        if self._captured_robot_idx is not None:
+            if now < self._capture_end_t and self._captured_robot_idx < len(robots):
+                rx, ry   = robots[self._captured_robot_idx]
+                self._x  = rx + self._captured_offset[0]
+                self._y  = ry + self._captured_offset[1]
+            else:
+                # Release — ball keeps its current position; velocity already set
+                self._captured_robot_idx = None
+        else:
+            # ── Normal physics ────────────────────────────────────────────────
+            self._x += self._vx * dt
+            self._y += self._vy * dt
 
-        sep = ROBOT_RADIUS + self.BALL_R
-        for rx, ry in self._all_robots():
-            dx, dy = self._x - rx, self._y - ry
-            dist   = math.hypot(dx, dy)
-            if 0 < dist < sep:
-                nx, ny  = dx / dist, dy / dist
-                self._x = rx + nx * sep
-                self._y = ry + ny * sep
-                dot     = self._vx * nx + self._vy * ny
-                if dot < 0:
-                    self._vx -= 2 * dot * nx
-                    self._vy -= 2 * dot * ny
+            if self._x < self.MARGIN:
+                self._x  = self.MARGIN;              self._vx =  abs(self._vx)
+            elif self._x > self.FIELD_W - self.MARGIN:
+                self._x  = self.FIELD_W - self.MARGIN; self._vx = -abs(self._vx)
+            if self._y < self.MARGIN:
+                self._y  = self.MARGIN;              self._vy =  abs(self._vy)
+            elif self._y > self.FIELD_H - self.MARGIN:
+                self._y  = self.FIELD_H - self.MARGIN; self._vy = -abs(self._vy)
+
+            sep = ROBOT_RADIUS + self.BALL_R
+            for i, (rx, ry) in enumerate(robots):
+                dx, dy = self._x - rx, self._y - ry
+                dist   = math.hypot(dx, dy)
+                if 0 < dist < sep:
+                    nx, ny = dx / dist, dy / dist
+                    self._x = rx + nx * sep
+                    self._y = ry + ny * sep
+                    dot = self._vx * nx + self._vy * ny
+                    if dot < 0:
+                        self._vx -= 2 * dot * nx
+                        self._vy -= 2 * dot * ny
+                    # 50% chance: lock ball to this robot for 10 s
+                    if random.random() < self.CAPTURE_CHANCE:
+                        self._captured_robot_idx = i
+                        self._captured_offset    = (self._x - rx, self._y - ry)
+                        self._capture_end_t      = now + self.CAPTURE_DURATION
+                    break  # one collision per frame
 
         if _robot_pos is not None and _imu_pitch is not None:
             heading_rad = math.radians(_imu_pitch)
@@ -300,8 +328,8 @@ if __name__ == "__main__":
     if _ap.parse_args().no_output:
         sys.stdout = open(os.devnull, "w")
 
-    if not _hw_available:
-        raise SystemExit("[VISION] Cannot start: OpenCV is not installed.")
+    # if not _hw_available:
+    #     raise SystemExit("[VISION] Cannot start: OpenCV is not installed.")
 
     try:
         val = mb.get("robot_position")

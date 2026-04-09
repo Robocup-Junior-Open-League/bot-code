@@ -83,6 +83,14 @@ def _move_along_line(ax, ay, bx, by, min_dist):
     ratio = min_dist / d
     return ax + (bx - ax) * ratio, ay + (by - ay) * ratio
 
+def _from_point(ax, ay, bx, by, dist):
+    """Move (bx, by) so that the result is at dist from (ax, ay)."""
+    d = math.hypot(bx - ax, by - ay)
+    if d == 0:
+        return bx, by
+    ratio = dist / d
+    return ax + (bx - ax) * ratio, ay + (by - ay) * ratio
+
 
 # ── Broker state ──────────────────────────────────────────────────────────────
 _robot_pos    = None   # {"x": float, "y": float}
@@ -330,7 +338,9 @@ def _compute_strategy_points(ctrl, robots):
                 if ally else float("inf"))
 
         if d_self <= d_ally:
-            return [_pt(bp["x"], bp["y"], _ENEMY_GOAL[0], _ENEMY_GOAL[1])]
+            return [
+                _pt(*_from_point(*_move_along_line(*_ENEMY_GOAL, *_move_along_line(*_OUR_GOAL, bp["x"], bp["y"], _MAX_RANGE), _MAX_RANGE), sp["x"], sp["y"], ROBOT_RADIUS), bp["x"], bp["y"])
+                ]
 
         else:
             if bp["y"] < FIELD_HEIGHT / 2:
@@ -376,9 +386,11 @@ def _compute_strategy_points(ctrl, robots):
                     )
 
                 ix, iy = _move_along_line(gx, gy, ix, iy, _MAX_RANGE)
-                ix, iy = _move_along_line(sp["x"], sp["y"], ix, iy, 2 * ROBOT_RADIUS)
+                ix, iy = _from_point(ix, iy, bp["x"], bp["y"], 2 * ROBOT_RADIUS)
 
-                return [_pt(ix, iy, closest_enemy["x"], closest_enemy["y"])]
+                return [
+                    _pt(ix, iy, closest_enemy["x"], closest_enemy["y"]),
+                    ]
 
             else:
                 pos = _find_passing_position(
@@ -437,19 +449,21 @@ def _compute_strategy_points(ctrl, robots):
             )
             ix, iy = _move_along_line(crx, cry, ix, iy, 2 * ROBOT_RADIUS)
             ix, iy = _move_along_line(target["x"], target["y"], ix, iy, 2 * ROBOT_RADIUS)
+            cx, cy = _from_point(crx, cry, target["x"], target["y"], 2 * ROBOT_RADIUS)
             return [
                 _pt(ix, iy, crx, cry),                          # pass-block → enemy controller
-                _pt(crx, cry, target["x"], target["y"]),        # enemy controller → pass target
+                _pt(cx, cy, crx, cry),                        # wrestling → enemy controller
             ]
 
         # We are closer (or no pass target) — block goal shot
-        ix1, iy1 = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
-        ix1, iy1 = _move_along_line(gx, gy, ix1, iy1, _MAX_RANGE)
-        ix1, iy1 = _move_along_line(crx, cry, ix1, iy1, 2 * ROBOT_RADIUS)
+        ix, iy = _closest_on_segment(crx, cry, gx, gy, sp["x"], sp["y"])
+        ix, iy = _move_along_line(gx, gy, ix, iy, _MAX_RANGE)
+        ix, iy = _move_along_line(crx, cry, ix, iy, 2 * ROBOT_RADIUS)
+        cx, cy = _from_point(crx, cry, gx, gy, 2 * ROBOT_RADIUS)
 
         return [
-            _pt(ix1, iy1, crx, cry),   # goal-block → enemy controller
-            _pt(crx, cry, gx, gy),     # enemy controller → our goal (threat direction)
+            _pt(ix, iy, crx, cry),   # goal-block → enemy controller
+            _pt(cx, cy, crx, cry),   # wrestling → enemy controller
             ]
 
     return []
@@ -487,6 +501,7 @@ def _publish(now):
 
     with _perf.measure("strategy"):
         strategy_points = _compute_strategy_points(ctrl, robots)
+        print(strategy_points)
         if len(strategy_points) > 0:
             mb.set("robot_strategy_points", json.dumps(strategy_points))
 
