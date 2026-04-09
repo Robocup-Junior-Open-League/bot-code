@@ -7,20 +7,21 @@ import threading
 import time
 import sys
 import cv2
+from picamera2 import Picamera2  # Direkter Import wie im Sweep-Skript
 
-# ── Camera specifications (Raspberry Pi Camera V2 / Webcam) ──────────────────
-FOV_DEG    = 62.2   # Horizontaler Blickwinkel der Pi Camera V2 (für PC-Webcam oft ~52.0°)
-RES_WIDTH  = 160    # Native 4:3 Format für maximale CPU-Schonung auf RPi Zero
-RES_HEIGHT = 120    
+# ── Camera specifications (Raspberry Pi Camera V2) ───────────────────────────
+FOV_DEG    = 62.2   # Horizontaler Blickwinkel der Pi Camera V2
+RES_WIDTH  = 320    # Auflösung exakt wie in sweep_calibration_no_gui.py
+RES_HEIGHT = 240    
 CENTER_X   = RES_WIDTH / 2.0
 
 # ── Image Masking (Zuschauer-Zensur) ───────────────────────────────────────────
 CENSOR_TOP_HEIGHT_PX = 30  # Oberste 30 Pixel schwärzen (Bunte T-Shirts ausblenden)
 
 # ── Colour filter (HSV) ────────────────────────────────────────────────────────
-# Trage hier eure perfekten Werte ein, die ihr mit dem Kalibrierungs-Skript gefunden habt
-LOWER_ORANGE = (5, 31, 166)
-UPPER_ORANGE = (19, 151, 255)
+# Werte übernommen aus sweep_calibration_no_gui.py
+LOWER_ORANGE = (5, 150, 200)
+UPPER_ORANGE = (22, 255, 255)
 
 # ── Detection thresholds ───────────────────────────────────────────────────────
 DEADZONE_PIXELS = 10  # Toleranz-Bereich für "FORWARD"
@@ -29,11 +30,12 @@ MIN_RADIUS      = 1   # Mindestradius in Pixel
 # ── Ball physical size & Robot geometry ────────────────────────────────────────
 BALL_RADIUS_MM = 21.0
 ROBOT_RADIUS = 0.09
-FIELD_WIDTH  = 1.82
-FIELD_HEIGHT = 2.43
+# Spielfeldmaße aus sweep Vorgaben
+FIELD_WIDTH  = 1.58
+FIELD_HEIGHT = 2.19
 BROKER_KEY = "ball_raw"
 
-SIM_REPLACE = True  # Setze dies auf True, um ABSICHTLICH den Digital Twin zu nutzen
+SIM_REPLACE = False  # Setze dies auf True, um ABSICHTLICH den Digital Twin zu nutzen
 
 # ── ADAPTIVE EXPONENTIAL MOVING AVERAGE (AEMA) SETUP ──────────────────────────
 AEMA_ALPHA_MIN = 0.08  # Starke Glättung bei Rauschen
@@ -86,7 +88,7 @@ _imu_pitch = None
 _sim_state = None
 
 def _process_frame(frame):
-    """Das Gehirn der Bildverarbeitung (aus dem Kalibrierungsskript übernommen)."""
+    """Das Gehirn der Bildverarbeitung."""
     # 🚫 ZUSCHAUER-ZENSUR
     if CENSOR_TOP_HEIGHT_PX > 0:
         frame[0:CENSOR_TOP_HEIGHT_PX, :] = (0, 0, 0)
@@ -139,14 +141,14 @@ def _process_frame(frame):
 
 class _SimBall:
     """Der geniale Digital Twin von eurem Projekt."""
-    FIELD_W  = 1.82
-    FIELD_H  = 2.43
+    FIELD_W  = 1.54  
+    FIELD_H  = 2.19  
     BALL_R   = BALL_RADIUS_MM / 1000.0
     MARGIN   = BALL_R + 0.02
     SPEED    = 0.6
 
-    CAPTURE_DURATION = 10.0   # seconds the ball stays locked to the robot
-    CAPTURE_CHANCE   = 0.5    # probability of capture on collision
+    CAPTURE_DURATION = 10.0
+    CAPTURE_CHANCE   = 0.5
 
     def __init__(self):
         import random
@@ -159,7 +161,7 @@ class _SimBall:
         _hsv = np.array([[[15, 200, 220]]], dtype=np.uint8)
         bgr  = cv2.cvtColor(_hsv, cv2.COLOR_HSV2BGR)[0, 0]
         self._orange_bgr = (int(bgr[0]), int(bgr[1]), int(bgr[2]))
-        self._captured_robot_idx = None   # index into _all_robots()
+        self._captured_robot_idx = None   
         self._captured_offset    = (0.0, 0.0)
         self._capture_end_t      = 0.0
 
@@ -313,56 +315,34 @@ if __name__ == "__main__":
 
     print("[VISION] Starting headless vision system...")
 
-    # 🚀 ROBUSTES KAMERA/SIMULATION SETUP
     picam2 = None
-    cap = None
     sim = None
 
     if SIM_REPLACE:
         sim = _SimBall()
         print("[VISION] SIM_REPLACE=True — using simulated ball (Digital Twin).")
     else:
-        try:
-            # 1. VERSUCH: Raspberry Pi Picamera2
-            from picamera2 import Picamera2
-            picam2 = Picamera2()
-            config = picam2.create_video_configuration(main={"size": (RES_WIDTH, RES_HEIGHT), "format": "BGR888"})
-            picam2.configure(config)
-            picam2.start()
-            print(f"[VISION] 🚀 Hardware Picamera2 gestartet ({RES_WIDTH}x{RES_HEIGHT}).")
-        except Exception as e:
-            # 2. VERSUCH: USB-Webcam (Für den PC)
-            print(f"[VISION] Picamera2 nicht gefunden ({e}). Teste USB-Webcam...")
-            cap = cv2.VideoCapture(0)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, RES_WIDTH)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RES_HEIGHT)
-            
-            if cap.isOpened():
-                print(f"[VISION] USB Webcam geoeffnet. (Achtung: FOV muss evtl. angepasst werden)")
-            else:
-                # 3. VERSUCH: Fallback auf Simulation (Digital Twin)
-                cap.release()
-                cap = None
-                sim = _SimBall()
-                print("[VISION] KEINE KAMERA GEFUNDEN! Wechsle sicherheitshalber in den Digital Twin-Modus.")
+        # Hardware Setup EXAKT wie in sweep_calibration_no_gui.py
+        picam2 = Picamera2()
+        picam2.configure(picam2.create_preview_configuration(
+            main={"format": "BGR888", "size": (RES_WIDTH, RES_HEIGHT)}
+        ))
+        picam2.start()
+        time.sleep(1)
+        print(f"[VISION] 🚀 Hardware Picamera2 gestartet ({RES_WIDTH}x{RES_HEIGHT}).")
 
     print(f"[VISION] Censor Box Active: Top {CENSOR_TOP_HEIGHT_PX} pixels will be ignored.")
     last_log_time = time.time()
 
     try:
         while True:
-            # 📸 ROBUSTES EINLESEN (Egal welche Kamera / Simulation aktiv ist)
+            # 📸 Frame einlesen (Kamera / Simulation)
             if sim is not None:
                 frame = sim.render()
-            elif picam2 is not None:
+            else:
                 frame = picam2.capture_array()
-            elif cap is not None:
-                ret, frame = cap.read()
-                if not ret:
-                    print("[VISION] ERROR: Camera connection lost!")
-                    break
-                # Wenn es die Webcam ist, erzwinge die richtige Groesse!
-                frame = cv2.resize(frame, (RES_WIDTH, RES_HEIGHT), interpolation=cv2.INTER_NEAREST)
+                # RGB zu BGR Konvertierung wie im Sweep-Skript!
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
             with _perf.measure("frame"):
                 result = _process_frame(frame)
@@ -414,10 +394,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[VISION] Stopped by user.")
     finally:
-        # Sauberes Beenden von jeglicher Hardware
         if picam2 is not None:
             picam2.stop()
-        if cap is not None:
-            cap.release()
         mb.close()
         print("[VISION] Camera closed. System stopped.")
