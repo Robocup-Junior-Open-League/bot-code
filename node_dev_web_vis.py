@@ -530,7 +530,13 @@ function drawStrategyPoints(s) {
     for (let i = 0; i < pts.length; i++) {
         const pt = pts[i];
         if (pt.dir) {
-            drawStrategyArrow(cx(pt.x), cy(pt.y), cx(pt.dir.x), cy(pt.dir.y), EDGE);
+            const _ddx = pt.dir.x - pt.x, _ddy = pt.dir.y - pt.y;
+            const _ddlen = Math.hypot(_ddx, _ddy);
+            if (_ddlen > 1e-6) {
+                const _s = RR * 2 / _ddlen;
+                drawStrategyArrow(cx(pt.x), cy(pt.y),
+                    cx(pt.x + _ddx * _s), cy(pt.y + _ddy * _s), EDGE);
+            }
         }
     }
     // Circles + index labels (drawn on top of arrows)

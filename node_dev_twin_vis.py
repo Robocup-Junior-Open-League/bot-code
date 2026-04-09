@@ -498,8 +498,14 @@ def _redraw():
             lbl.set_visible(True)
             d = pt.get("dir")
             if d is not None:
-                arrow.set_positions((px, py), (d["x"], d["y"]))
-                arrow.set_visible(True)
+                _adx, _ady = d["x"] - px, d["y"] - py
+                _alen = math.hypot(_adx, _ady)
+                if _alen > 1e-6:
+                    _s = ROBOT_RADIUS * 2.0 / _alen
+                    arrow.set_positions((px, py), (px + _adx * _s, py + _ady * _s))
+                    arrow.set_visible(True)
+                else:
+                    arrow.set_visible(False)
             else:
                 arrow.set_visible(False)
         else:
