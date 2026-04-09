@@ -18,6 +18,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
+from utils.perf_monitor import PerfMonitor
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HOST = "0.0.0.0"
@@ -25,6 +26,7 @@ PORT = 5050
 
 # ─────────────────────────────────────────────────────────────────────────────
 mb = TelemetryBroker()
+_perf = PerfMonitor("node_dev_web_vis", broker=mb, print_every=100)
 
 # ── Broker state (same variables as node_dev_twin_vis) ────────────────────────
 _state_lock           = threading.Lock()
@@ -47,7 +49,7 @@ _ally_id              = None
 _ally_pos_raw         = {}
 _raw_robots           = None
 _ball_raw             = None
-_field_sectors        = None
+_game_state        = None
 _strategy_points      = []
 
 # ── SSE push ──────────────────────────────────────────────────────────────────
@@ -62,29 +64,30 @@ def _notify():
 
 def _build_state():
     """Snapshot current state as a JSON string (called under _state_lock)."""
-    return json.dumps({
-        "robot_pos":            list(_robot_pos) if _robot_pos else None,
-        "heading":              _imu_pitch,
-        "detection_origin":     list(_detection_origin) if _detection_origin else None,
-        "detection_heading":    _detection_heading,
-        "other_robots":         _other_robots,
-        "ally_id":              _ally_id,
-        "lidar":                _lidar,
-        "walls":                _walls,
-        "ball_pos":             _ball_pos,
-        "ball_hidden_pos":      _ball_hidden_pos,
-        "ball_lost":            _ball_lost,
-        "ball_vx":              _ball_vx,
-        "ball_vy":              _ball_vy,
-        "ball_history":         _ball_history,
-        "position_history":     _position_history,
-        "other_robots_history": _other_robots_history,
-        "raw_robots":           _raw_robots,
-        "ball_raw":             _ball_raw,
-        "field_sectors":        _field_sectors,
-        "ally_pos_raw":         _ally_pos_raw,
-        "strategy_points":      _strategy_points,
-    })
+    with _perf.measure("serialize"):
+        return json.dumps({
+            "robot_pos":            list(_robot_pos) if _robot_pos else None,
+            "heading":              _imu_pitch,
+            "detection_origin":     list(_detection_origin) if _detection_origin else None,
+            "detection_heading":    _detection_heading,
+            "other_robots":         _other_robots,
+            "ally_id":              _ally_id,
+            "lidar":                _lidar,
+            "walls":                _walls,
+            "ball_pos":             _ball_pos,
+            "ball_hidden_pos":      _ball_hidden_pos,
+            "ball_lost":            _ball_lost,
+            "ball_vx":              _ball_vx,
+            "ball_vy":              _ball_vy,
+            "ball_history":         _ball_history,
+            "position_history":     _position_history,
+            "other_robots_history": _other_robots_history,
+            "raw_robots":           _raw_robots,
+            "ball_raw":             _ball_raw,
+            "game_state":        _game_state,
+            "ally_pos_raw":         _ally_pos_raw,
+            "strategy_points":      _strategy_points,
+        })
 
 # ── HTML page (served once; all rendering is client-side) ─────────────────────
 _HTML = r"""<!DOCTYPE html>
@@ -517,10 +520,10 @@ function drawStrategyPoints(s) {
 // ── Game state HTML panel ─────────────────────────────────────────────────────
 const gsEl = document.getElementById('gs');
 function updateGameState(s) {
-    if (!s.field_sectors) { gsEl.textContent = 'ball: —'; return; }
-    const ctrl     = s.field_sectors.ball_control;
-    const ctrlTeam = s.field_sectors.controlling_team;
-    const bp       = s.field_sectors.ball;
+    if (!s.game_state) { gsEl.textContent = 'ball: —'; return; }
+    const ctrl     = s.game_state.ball_control;
+    const ctrlTeam = s.game_state.controlling_team;
+    const bp       = s.game_state.ball;
 
     const ballStr = bp ? `(${bp.x.toFixed(2)}, ${bp.y.toFixed(2)})` : '—';
     const teamStr = ctrlTeam != null ? `T${ctrlTeam}` : '—';
@@ -625,8 +628,9 @@ class _Handler(BaseHTTPRequestHandler):
                     cur_seq = _push_seq
                 if cur_seq == last_seq:
                     try:
-                        self.wfile.write(b": ka\n\n")
-                        self.wfile.flush()
+                        with _perf.measure("sse_send"):
+                            self.wfile.write(b": ka\n\n")
+                            self.wfile.flush()
                     except Exception:
                         break
                     continue
@@ -651,73 +655,76 @@ def on_update(key, value):
     global _robot_pos, _other_robots, _walls
     global _position_history, _other_robots_history
     global _ball_pos, _ball_hidden_pos, _ball_lost, _ball_vx, _ball_vy, _ball_history
-    global _ally_id, _ally_pos_raw, _raw_robots, _ball_raw, _field_sectors, _strategy_points
+    global _ally_id, _ally_pos_raw, _raw_robots, _ball_raw, _game_state, _strategy_points
 
     if value is None:
         return
-    try:
-        with _state_lock:
-            if key == "lidar":
-                raw = __import__('json').loads(value)
-                _lidar = {int(k): int(v) for k, v in raw.items()}
-            elif key == "imu_pitch":
-                _imu_pitch = float(value)
-            elif key == "robot_position":
-                p = json.loads(value)
-                _robot_pos = (float(p["x"]), float(p["y"]))
-            elif key == "other_robots":
-                payload = json.loads(value)
-                if isinstance(payload, dict):
-                    orig = payload.get("origin")
-                    if orig:
-                        _detection_origin  = (float(orig["x"]), float(orig["y"]))
-                        if "heading" in orig:
-                            _detection_heading = math.radians(float(orig["heading"]))
-                    robot_list = payload.get("robots", [])
-                else:
-                    robot_list = payload
-                _other_robots = [[float(r["x"]), float(r["y"]),
-                                   r.get("method", ""), int(r.get("id", 0)),
-                                   bool(r.get("ally", False))]
-                                  for r in robot_list]
-            elif key == "lidar_walls":
-                _walls = json.loads(value)
-            elif key == "position_history":
-                _position_history = json.loads(value)
-            elif key == "other_robots_history":
-                _other_robots_history = json.loads(value)
-            elif key == "ball":
-                payload          = json.loads(value)
-                _ball_pos        = payload.get("global_pos")
-                _ball_hidden_pos = payload.get("hidden_pos")
-                _ball_lost       = bool(payload.get("ball_lost", False))
-                _ball_vx         = payload.get("vx")
-                _ball_vy         = payload.get("vy")
-            elif key == "ball_history":
-                _ball_history = json.loads(value)
-            elif key == "raw_robots":
-                _raw_robots = json.loads(value)
-            elif key == "ball_raw":
-                _ball_raw = json.loads(value)
-            elif key == "field_sectors":
-                _field_sectors = json.loads(value)
-            elif key == "robot_strategy_points":
-                _strategy_points = json.loads(value)
-            elif key == "ally_id":
-                try:
-                    _ally_id = int(value) if value else None
-                except (ValueError, TypeError):
-                    _ally_id = None
-            elif key in ("ally_main_robot_pos", "ally_other_pos_1",
-                         "ally_other_pos_2", "ally_other_pos_3", "ally_ball_pos"):
-                try:
+
+
+    with _perf.measure("update"):
+        try:
+            with _state_lock:
+                if key == "lidar":
+                    raw = __import__('json').loads(value)
+                    _lidar = {int(k): int(v) for k, v in raw.items()}
+                elif key == "imu_pitch":
+                    _imu_pitch = float(value)
+                elif key == "robot_position":
                     p = json.loads(value)
-                    _ally_pos_raw[key] = {"x": float(p["x"]), "y": float(p["y"])}
-                except Exception:
-                    _ally_pos_raw.pop(key, None)
-    except Exception as e:
-        print(f"[WEB-VIS] parse error on {key!r}: {e}")
-        return
+                    _robot_pos = (float(p["x"]), float(p["y"]))
+                elif key == "other_robots":
+                    payload = json.loads(value)
+                    if isinstance(payload, dict):
+                        orig = payload.get("origin")
+                        if orig:
+                            _detection_origin  = (float(orig["x"]), float(orig["y"]))
+                            if "heading" in orig:
+                                _detection_heading = math.radians(float(orig["heading"]))
+                        robot_list = payload.get("robots", [])
+                    else:
+                        robot_list = payload
+                    _other_robots = [[float(r["x"]), float(r["y"]),
+                                    r.get("method", ""), int(r.get("id", 0)),
+                                    bool(r.get("ally", False))]
+                                    for r in robot_list]
+                elif key == "lidar_walls":
+                    _walls = json.loads(value)
+                elif key == "position_history":
+                    _position_history = json.loads(value)
+                elif key == "other_robots_history":
+                    _other_robots_history = json.loads(value)
+                elif key == "ball":
+                    payload          = json.loads(value)
+                    _ball_pos        = payload.get("global_pos")
+                    _ball_hidden_pos = payload.get("hidden_pos")
+                    _ball_lost       = bool(payload.get("ball_lost", False))
+                    _ball_vx         = payload.get("vx")
+                    _ball_vy         = payload.get("vy")
+                elif key == "ball_history":
+                    _ball_history = json.loads(value)
+                elif key == "raw_robots":
+                    _raw_robots = json.loads(value)
+                elif key == "ball_raw":
+                    _ball_raw = json.loads(value)
+                elif key == "game_state":
+                    _game_state = json.loads(value)
+                elif key == "robot_strategy_points":
+                    _strategy_points = json.loads(value)
+                elif key == "ally_id":
+                    try:
+                        _ally_id = int(value) if value else None
+                    except (ValueError, TypeError):
+                        _ally_id = None
+                elif key in ("ally_main_robot_pos", "ally_other_pos_1",
+                            "ally_other_pos_2", "ally_other_pos_3", "ally_ball_pos"):
+                    try:
+                        p = json.loads(value)
+                        _ally_pos_raw[key] = {"x": float(p["x"]), "y": float(p["y"])}
+                    except Exception:
+                        _ally_pos_raw.pop(key, None)
+        except Exception as e:
+            print(f"[WEB-VIS] parse error on {key!r}: {e}")
+            return
 
     _notify()
 
@@ -725,6 +732,12 @@ def on_update(key, value):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import argparse, sys, os
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--no-output", action="store_true")
+    if _ap.parse_args().no_output:
+        sys.stdout = open(os.devnull, "w")
+
     _SEEDS = {
         "imu_pitch":            lambda v: float(v),
         "lidar":                lambda v: {int(k): int(x) for k, x in json.loads(v).items()},
@@ -741,7 +754,7 @@ if __name__ == "__main__":
         "ally_id":              lambda v: int(v) if v and v.strip() else None,
         "raw_robots":           lambda v: json.loads(v),
         "ball_raw":             lambda v: json.loads(v),
-        "field_sectors":           lambda v: json.loads(v),
+        "game_state":           lambda v: json.loads(v),
         "robot_strategy_points":   lambda v: json.loads(v),
     }
     _TARGETS = {
@@ -757,7 +770,7 @@ if __name__ == "__main__":
         "ally_id":                 "_ally_id",
         "raw_robots":              "_raw_robots",
         "ball_raw":                "_ball_raw",
-        "field_sectors":           "_field_sectors",
+        "game_state":           "_game_state",
         "robot_strategy_points":   "_strategy_points",
     }
     for key, parse in _SEEDS.items():
@@ -801,5 +814,8 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     finally:
+        print("\n[WEB-VIS] Stopped.")
+        mb.close()
+
         print("\n[WEB-VIS] Stopped.")
         mb.close()

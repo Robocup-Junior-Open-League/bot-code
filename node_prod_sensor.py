@@ -152,6 +152,12 @@ def _on_sim_state(rx, ry, obs_snap):
 
 
 if __name__ == "__main__":
+    import argparse, sys, os
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--no-output", action="store_true")
+    if _ap.parse_args().no_output:
+        sys.stdout = open(os.devnull, "w")
+
     # ── IMU setup ─────────────────────────────────────────────────────────────
     if _hw_imu_available:
         _check_imu_baudrate()

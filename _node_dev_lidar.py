@@ -43,6 +43,12 @@ def on_scan(batch):
 
 
 if __name__ == "__main__":
+    import argparse, sys, os
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--no-output", action="store_true")
+    if _ap.parse_args().no_output:
+        sys.stdout = open(os.devnull, "w")
+
     # Seed imu_pitch and subscribe — runs in a daemon thread so it stays live
     # alongside whichever blocking path (hardware loop or sim) runs below.
     try:

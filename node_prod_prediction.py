@@ -393,6 +393,12 @@ def on_update(key, value):
 
 
 if __name__ == "__main__":
+    import argparse, sys, os
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--no-output", action="store_true")
+    if _ap.parse_args().no_output:
+        sys.stdout = open(os.devnull, "w")
+
     for key, target, parse in [
         ("robot_position", "_robot_pos", lambda v: (lambda p: (float(p["x"]), float(p["y"])))(json.loads(v))),
         ("imu_pitch",      "_imu_pitch", float),

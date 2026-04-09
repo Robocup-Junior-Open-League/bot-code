@@ -28,6 +28,12 @@ def _truncate(value):
     return value
 
 
+import argparse, sys
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--no-output", action="store_true")
+if _ap.parse_args().no_output:
+    import os; sys.stdout = open(os.devnull, "w")
+
 print(HIDE_CURSOR, end="")
 
 while True:

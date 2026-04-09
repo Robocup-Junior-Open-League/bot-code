@@ -46,7 +46,7 @@ _ally_id              = None  # persistent ally robot ID from cooperation node
 _ally_pos_raw         = {}    # "ally_main_robot_pos" / "ally_other_pos_N" / "ally_ball_pos" → {"x","y"}
 _raw_robots           = None  # list of raw robot positions from positioning (without ally)
 _ball_raw             = None  # raw ball position from detection (without ally)
-_field_sectors        = None  # latest field_sectors payload from master node
+_game_state        = None  # latest game_state payload from master node
 _strategy_points      = []   # list of {"x", "y"} from robot_strategy_points
 
 _state_lock   = threading.Lock()
@@ -506,10 +506,10 @@ def _redraw():
     )
 
     # ── Ball control text ─────────────────────────────────────────────────────
-    if _field_sectors is not None:
-        ctrl      = _field_sectors.get("ball_control")
-        ctrl_team = _field_sectors.get("controlling_team")
-        bp        = _field_sectors.get("ball")
+    if _game_state is not None:
+        ctrl      = _game_state.get("ball_control")
+        ctrl_team = _game_state.get("controlling_team")
+        bp        = _game_state.get("ball")
 
         ball_str = f"({bp['x']:.2f}, {bp['y']:.2f})" if bp else "—"
         team_str = f"T{ctrl_team}" if ctrl_team is not None else "—"
@@ -553,7 +553,7 @@ def on_update(key, value):
     global _position_history, _other_robots_history
     global _ball_pos, _ball_hidden_pos, _ball_lost, _ball_vx, _ball_vy, _ball_history
     global _sim_ball_pos, _sim_state, _ally_id, _ally_pos_raw
-    global _raw_robots, _ball_raw, _field_sectors, _strategy_points
+    global _raw_robots, _ball_raw, _game_state, _strategy_points
 
     if value is None:
         return
@@ -617,8 +617,8 @@ def on_update(key, value):
             elif key == "ball_raw":
                 _ball_raw = json.loads(value)
 
-            elif key == "field_sectors":
-                _field_sectors = json.loads(value)
+            elif key == "game_state":
+                _game_state = json.loads(value)
 
             elif key == "robot_strategy_points":
                 _strategy_points = json.loads(value)
@@ -645,6 +645,12 @@ def on_update(key, value):
 
 
 if __name__ == "__main__":
+    import argparse, sys, os
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--no-output", action="store_true")
+    if _ap.parse_args().no_output:
+        sys.stdout = open(os.devnull, "w")
+
     _SEEDS = {
         "imu_pitch":            lambda v: float(v),
         "lidar":                lambda v: {int(k): int(x) for k, x in json.loads(v).items()},
@@ -660,7 +666,7 @@ if __name__ == "__main__":
         "ally_id":              lambda v: int(v) if v and v.strip() else None,
         "raw_robots":           lambda v: json.loads(v),
         "ball_raw":             lambda v: json.loads(v),
-        "field_sectors":           lambda v: json.loads(v),
+        "game_state":           lambda v: json.loads(v),
         "robot_strategy_points":   lambda v: json.loads(v),
     }
     _TARGETS = {
@@ -677,7 +683,7 @@ if __name__ == "__main__":
         "ally_id":              "_ally_id",
         "raw_robots":           "_raw_robots",
         "ball_raw":             "_ball_raw",
-        "field_sectors":           "_field_sectors",
+        "game_state":           "_game_state",
         "robot_strategy_points":   "_strategy_points",
     }
     for key, parse in _SEEDS.items():

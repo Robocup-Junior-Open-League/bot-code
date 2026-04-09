@@ -3,11 +3,12 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "robus-core"))
 
 import json
+import math
 import time
 import threading
 from robus_core.libs.lib_telemtrybroker import TelemetryBroker
 from utils.perf_monitor import PerfMonitor
-from utils.cooperation_reader import SerialCooperationReader, SimCooperationReader
+from utils.cooperation_reader import SPICooperationReader, SimCooperationReader
 
 # ── Reader factory ────────────────────────────────────────────────────────────
 # To swap the transport layer, return a different BaseCooperationReader here.
@@ -18,23 +19,107 @@ _perf = PerfMonitor("node_prod_communication", broker=mb, print_every=100)
 
 
 def _make_reader():
-    if COOP_SIM_REPLACE and not os.path.exists(SerialCooperationReader.DEFAULT_PORT):
+    spi_path = f"/dev/spidev{SPICooperationReader.DEFAULT_BUS}.{SPICooperationReader.DEFAULT_DEVICE}"
+    if COOP_SIM_REPLACE and not os.path.exists(spi_path):
         return SimCooperationReader(
             get_sim_state=lambda: _sim_state,
             get_ball_sim=lambda: _ball_sim_pos,
         )
-    return SerialCooperationReader()
+    return SPICooperationReader()
 
+
+# ── Motor control constants ───────────────────────────────────────────────────
+# Mirrors the C++ motorSpeeds() / setMotorSpeeds() constants.
+_KP               = 0.8    # proportional gain
+_MIN_TURN_SPEED   = 30     # % — minimum power during a proportional turn
+_TOLERANCE_DEG    = 10.0   # degrees — dead-band (full forward / full reverse)
+_MIN_STEP_DELAY   = 200    # minimum step delay in µs at 100% speed
+_MAX_STEP_DELAY   = 800    # minimum step delay in µs at 100% speed
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Broker state — updated by on_update()
-_sim_state    = None   # {"robot": [x,y], "obstacles": [[x,y],...]} from sim_state
-_ball_sim_pos = None   # {"x": float, "y": float} — true sim ball position
+_sim_state       = None   # {"robot": [x,y], "obstacles": [[x,y],...]} from sim_state
+_ball_sim_pos    = None   # {"x": float, "y": float} — true sim ball position
 
-# Our own robot state — sent outward over serial
-_own_pos      = None   # {"x": float, "y": float} from robot_position
-_other_robots = None   # {"robots": [...]} from other_robots (detections + predictions)
-_ball         = None   # {"global_pos": {...}, ...} from ball
-_ball_lost    = False  # bool from ball_lost
+# Our own robot state — sent outward over SPI
+_own_pos         = None   # {"x": float, "y": float} from robot_position
+_other_robots    = None   # {"robots": [...]} from other_robots (detections + predictions)
+_ball            = None   # {"global_pos": {...}, ...} from ball
+_ball_lost       = False  # bool from ball_lost
+_strategy_points = []     # [{"x": float, "y": float}, ...] from robot_strategy_points
+_imu_heading     = None   # degrees — robot heading from imu_pitch
+
+
+# ── Motor control helpers ─────────────────────────────────────────────────────
+
+def _compute_steering_error():
+    """
+    Return steering error in radians, or None if data is unavailable.
+    Equivalent to driveDir() in C++.
+    """
+    if not _strategy_points or _own_pos is None or _imu_heading is None:
+        return None
+    try:
+        goal_x   = float(_strategy_points[0]["x"])
+        goal_y   = float(_strategy_points[0]["y"])
+        robot_x  = float(_own_pos["x"])
+        robot_y  = float(_own_pos["y"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    target = math.atan2(goal_y - robot_y, goal_x - robot_x)
+    error  = target - math.radians(_imu_heading)
+    # Normalise to [-π, π]
+    while error >  math.pi: error -= 2 * math.pi
+    while error < -math.pi: error += 2 * math.pi
+    return error
+
+
+def _motor_speeds(error_rad):
+    """
+    Convert steering error (radians) to (left, right) speed percentages
+    in the range [-100, 100].  Equivalent to motorSpeeds() in C++.
+    """
+    error_deg = math.degrees(error_rad)
+
+    if abs(error_deg) <= _TOLERANCE_DEG:
+        # Within forward dead-band — drive straight ahead
+        return 100, 100
+    if abs(error_deg) >= (180.0 - _TOLERANCE_DEG):
+        # Within backward dead-band — reverse
+        return -100, -100
+
+    # Proportional turn
+    p_speed = int(abs(error_deg) * _KP)
+    p_speed = max(_MIN_TURN_SPEED, min(100, p_speed))
+    if error_deg > 0:
+        return -p_speed, p_speed   # target left  → spin CCW
+    return p_speed, -p_speed       # target right → spin CW
+
+
+def _motor_fields(left, right):
+    """
+    Convert signed speed percentages to the l/r/k/sp frame fields.
+    Equivalent to setMotorSpeeds() in C++.
+    """
+    left  = max(-100, min(100, left))
+    right = max(-100, min(100, right))
+    steps_l = round(_MIN_STEP_DELAY + (_MAX_STEP_DELAY - _MIN_STEP_DELAY) * abs(left) / 100)
+    steps_r = round(_MIN_STEP_DELAY + (_MAX_STEP_DELAY - _MIN_STEP_DELAY) * abs(right) / 100)
+    dir_l   = 1 if left  >= 0 else 0
+    dir_r   = 1 if right >= 0 else 0
+
+    fields = {
+        "l": {"s": steps_l, "d": dir_l},
+        "r": {"s": steps_r, "d": dir_r},
+        "k": {"s": 0, "d": 0},
+    }
+    # Include sp only when it deviates from the default (100), matching
+    # the C++ drive() convention and keeping frames compact.
+    dominant = max(abs(left), abs(right))
+    if dominant < 100:
+        fields["sp"] = dominant
+    return fields
 
 
 # ── Frame handler ─────────────────────────────────────────────────────────────
@@ -89,7 +174,13 @@ def on_sim_frame(data):
 
 def _build_outgoing_frame():
     """Build a cooperation frame from our robot's current state."""
-    frame = {"type": "communication"}
+    # ── Motor control ──────────────────────────────────────────────────────────
+    error = _compute_steering_error()
+    if error is not None:
+        left, right = _motor_speeds(error)
+        frame = _motor_fields(left, right)
+    else:
+        frame = {"l": {"s": 0, "d": 0}, "r": {"s": 0, "d": 0}, "k": {"s": 0, "d": 0}}
 
     if _own_pos is not None:
         frame["main_robot_pos"] = {
@@ -143,8 +234,8 @@ def _build_outgoing_frame():
 
 
 def _send_loop(reader_ref):
-    """Periodically transmit our robot's state over serial at ~10 Hz."""
-    interval = 0.1
+    """Periodically transmit our robot's state at 20 Hz (every 50 ms)."""
+    interval = 0.05
     while True:
         frame = _build_outgoing_frame()
         reader_ref[0].send(frame)
@@ -155,6 +246,7 @@ def _send_loop(reader_ref):
 
 def on_update(key, value):
     global _sim_state, _ball_sim_pos, _own_pos, _other_robots, _ball, _ball_lost
+    global _strategy_points, _imu_heading
 
     if value is None:
         return
@@ -191,10 +283,29 @@ def on_update(key, value):
         except (json.JSONDecodeError, TypeError):
             pass
 
+    elif key == "robot_strategy_points":
+        try:
+            _strategy_points = json.loads(value) or []
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    elif key == "imu_pitch":
+        try:
+            _imu_heading = float(value)
+        except (ValueError, TypeError):
+            pass
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+
+    import argparse, sys, os
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--no-output", action="store_true")
+    if _ap.parse_args().no_output:
+        sys.stdout = open(os.devnull, "w")
+
     for key in ("sim_state", "ball", "ball_lost", "robot_position", "other_robots"):
         try:
             val = mb.get(key)
@@ -203,7 +314,8 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    mb.setcallback(["sim_state", "ball", "ball_lost", "robot_position", "other_robots"],
+    mb.setcallback(["sim_state", "ball", "ball_lost", "robot_position", "other_robots",
+                    "robot_strategy_points", "imu_pitch"],
                    on_update)
     threading.Thread(target=mb.receiver_loop, daemon=True,
                      name="broker-receiver").start()

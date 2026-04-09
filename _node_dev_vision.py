@@ -334,6 +334,12 @@ def _compute_global_pos(distance_cm, angle_deg):
 
 
 if __name__ == "__main__":
+    import argparse, sys, os
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--no-output", action="store_true")
+    if _ap.parse_args().no_output:
+        sys.stdout = open(os.devnull, "w")
+
     if not _hw_available:
         raise SystemExit("[VISION] Cannot start: OpenCV is not installed.")
 

@@ -16,16 +16,17 @@ PERF_NODES = [
     "node_prod_communication",
     "node_prod_master",
     # ── Individual (dev) nodes ────────────────────────────────────────────────
-    "node_dev_imu",
-    "node_dev_lidar",
-    "node_dev_pos_walls",
-    "node_dev_pos",
-    "node_dev_pos_robots",
-    "node_dev_predict_robots",
-    "node_dev_predict_ball",
-    "node_dev_vision",
+    # "node_dev_imu",
+    # "node_dev_lidar",
+    # "node_dev_pos_walls",
+    # "node_dev_pos",
+    # "node_dev_pos_robots",
+    # "node_dev_predict_robots",
+    # "node_dev_predict_ball",
+    # "node_dev_vision",
     "node_dev_twin_vis",
-    "node_dev_time",
+    "node_dev_web_vis",
+    # "node_dev_time",
     "node_dev_bus_display",
 ]
 # ─────────────────────────────────────────────────────────────────────────────
@@ -118,6 +119,12 @@ def on_update(key: str, value) -> None:
 
 
 if __name__ == "__main__":
+    import argparse, sys, os
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--no-output", action="store_true")
+    if _ap.parse_args().no_output:
+        sys.stdout = open(os.devnull, "w")
+
     for key in PERF_KEYS:
         try:
             val = mb.get(key)

@@ -2,6 +2,12 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "robus-core"))
 
+import argparse
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--no-output", action="store_true")
+if _ap.parse_args().no_output:
+    sys.stdout = open(os.devnull, "w")
+
 import time
 import math
 import random
