@@ -35,6 +35,7 @@ _MIN_TURN_SPEED   = 30     # % — minimum power during a proportional turn
 _TOLERANCE_DEG    = 10.0   # degrees — dead-band (full forward / full reverse)
 _MIN_STEP_DELAY   = 200    # minimum step delay in µs at 100% speed
 _MAX_STEP_DELAY   = 800    # minimum step delay in µs at 100% speed
+_ROTATE_OFFSET_DEG = 90.0  # spin offset when ball is unknown — drives constant rotation
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Broker state — updated by on_update()
@@ -95,6 +96,54 @@ def _motor_speeds(error_rad):
     if error_deg > 0:
         return -p_speed, p_speed   # target left  → spin CCW
     return p_speed, -p_speed       # target right → spin CW
+
+
+def _compute_spin_error():
+    """Return the spin error in degrees (target_dir − imu_heading), normalised
+    to [−180, 180], or None if required data is missing.
+
+    Target direction:
+      • Ball known → angle from our position toward strategy_points[0]["dir"].
+      • Ball unknown → imu_heading + _ROTATE_OFFSET_DEG (constant rotation).
+    """
+    if _imu_heading is None:
+        return None
+
+    ball_known = (
+        _ball is not None
+        and _ball.get("global_pos") is not None
+        and not _ball_lost
+    )
+
+    if ball_known and _strategy_points:
+        pt = _strategy_points[0]
+        d  = pt.get("dir")
+        if d is not None and _own_pos is not None:
+            try:
+                dx = float(d["x"]) - float(_own_pos["x"])
+                dy = float(d["y"]) - float(_own_pos["y"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            target_deg = math.degrees(math.atan2(dy, dx))
+        else:
+            return None
+    else:
+        target_deg = _imu_heading + _ROTATE_OFFSET_DEG
+
+    error = target_deg - _imu_heading
+    while error >  180.0: error -= 360.0
+    while error < -180.0: error += 360.0
+    return error
+
+
+def _spin_k_fields(error_deg):
+    """Convert a spin error (degrees) to k-motor frame fields."""
+    if abs(error_deg) <= _TOLERANCE_DEG:
+        return {"s": 0, "d": 0}
+    p_speed = int(abs(error_deg) * _KP)
+    p_speed = max(_MIN_TURN_SPEED, min(100, p_speed))
+    steps   = round(_MIN_STEP_DELAY + (_MAX_STEP_DELAY - _MIN_STEP_DELAY) * p_speed / 100)
+    return {"s": steps, "d": 1 if error_deg > 0 else 0}
 
 
 def _motor_fields(left, right):
@@ -181,6 +230,10 @@ def _build_outgoing_frame():
         frame = _motor_fields(left, right)
     else:
         frame = {"l": {"s": 0, "d": 0}, "r": {"s": 0, "d": 0}, "k": {"s": 0, "d": 0}}
+
+    spin_error = _compute_spin_error()
+    if spin_error is not None:
+        frame["k"] = _spin_k_fields(spin_error)
 
     if _own_pos is not None:
         frame["main_robot_pos"] = {

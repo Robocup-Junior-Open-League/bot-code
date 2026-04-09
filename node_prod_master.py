@@ -317,6 +317,10 @@ def _compute_strategy_points(ctrl, robots):
     ally = next((r for r in robots if r["team"] == TEAM_US), None)
     enemies = [r for r in robots if r["team"] == TEAM_ENEMY]
 
+    def _pt(x, y, dir_x, dir_y):
+        return {"x": round(x, 3), "y": round(y, 3),
+                "dir": {"x": round(dir_x, 3), "y": round(dir_y, 3)}}
+
     if ctrl is None:
         if bp is None or sp is None:
             return []
@@ -326,7 +330,7 @@ def _compute_strategy_points(ctrl, robots):
                 if ally else float("inf"))
 
         if d_self <= d_ally:
-            return [{"x": round(bp["x"], 3), "y": round(bp["y"], 3)}]
+            return [_pt(bp["x"], bp["y"], _ENEMY_GOAL[0], _ENEMY_GOAL[1])]
 
         else:
             if bp["y"] < FIELD_HEIGHT / 2:
@@ -374,7 +378,7 @@ def _compute_strategy_points(ctrl, robots):
                 ix, iy = _move_along_line(gx, gy, ix, iy, _MAX_RANGE)
                 ix, iy = _move_along_line(sp["x"], sp["y"], ix, iy, 2 * ROBOT_RADIUS)
 
-                return [{"x": round(ix, 3), "y": round(iy, 3)}]
+                return [_pt(ix, iy, closest_enemy["x"], closest_enemy["y"])]
 
             else:
                 pos = _find_passing_position(
@@ -387,7 +391,7 @@ def _compute_strategy_points(ctrl, robots):
                     px, py = _move_along_line(
                         _ENEMY_GOAL[0], _ENEMY_GOAL[1], pos[0], pos[1], _MAX_RANGE
                     )
-                    return [{"x": round(px, 3), "y": round(py, 3)}]
+                    return [_pt(px, py, ally["x"], ally["y"])]
                 return []
 
     if ctrl.get("team") == TEAM_US:
@@ -402,7 +406,7 @@ def _compute_strategy_points(ctrl, robots):
             px, py = _move_along_line(
                 _ENEMY_GOAL[0], _ENEMY_GOAL[1], pos[0], pos[1], _MAX_RANGE
             )
-            return [{"x": round(px, 3), "y": round(py, 3)}]
+            return [_pt(px, py, _ENEMY_GOAL[0], _ENEMY_GOAL[1])]
         else:
             pos = _find_passing_position(
                 sp["x"], sp["y"],
@@ -415,7 +419,7 @@ def _compute_strategy_points(ctrl, robots):
             px, py = _move_along_line(
                 _ENEMY_GOAL[0], _ENEMY_GOAL[1], pos[0], pos[1], _MAX_RANGE
             )
-            return [{"x": round(px, 3), "y": round(py, 3)}]
+            return [_pt(px, py, ally["x"], ally["y"])]
 
     if ctrl.get("team") == TEAM_ENEMY:
         crx, cry = ctrl["x"], ctrl["y"]
@@ -434,8 +438,8 @@ def _compute_strategy_points(ctrl, robots):
             ix, iy = _move_along_line(crx, cry, ix, iy, 2 * ROBOT_RADIUS)
             ix, iy = _move_along_line(target["x"], target["y"], ix, iy, 2 * ROBOT_RADIUS)
             return [
-                {"x": round(ix, 3), "y": round(iy, 3)}, 
-                {"x": round(crx, 3), "y": round(cry, 3)}
+                _pt(ix, iy, crx, cry),                          # pass-block → enemy controller
+                _pt(crx, cry, target["x"], target["y"]),        # enemy controller → pass target
             ]
 
         # We are closer (or no pass target) — block goal shot
@@ -444,9 +448,9 @@ def _compute_strategy_points(ctrl, robots):
         ix1, iy1 = _move_along_line(crx, cry, ix1, iy1, 2 * ROBOT_RADIUS)
 
         return [
-            {"x": round(ix1, 3), "y": round(iy1, 3)},
-            {"x": round(crx, 3), "y": round(cry, 3)},
-        ]
+            _pt(ix1, iy1, crx, cry),   # goal-block → enemy controller
+            _pt(crx, cry, gx, gy),     # enemy controller → our goal (threat direction)
+            ]
 
     return []
 

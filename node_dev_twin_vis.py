@@ -209,8 +209,9 @@ _art_ally_ball = _ally_marker('*')   # ally's detected ball position
 _MAX_STRATEGY_PTS = 5
 _STRATEGY_GREEN   = '#22aa22'
 
-_art_strategy_pts  = []
-_art_strategy_lbls = []
+_art_strategy_pts    = []
+_art_strategy_lbls   = []
+_art_strategy_arrows = []
 for _i in range(_MAX_STRATEGY_PTS):
     _c = patches.Circle((0, 0), 0.025,
         lw=1.5, edgecolor=_STRATEGY_GREEN, facecolor='#88dd88',
@@ -220,6 +221,13 @@ for _i in range(_MAX_STRATEGY_PTS):
     _t = ax.text(0, 0, str(_i), ha='center', va='center', fontsize=8,
         color='black', fontweight='bold', animated=True, visible=False, zorder=7)
     _art_strategy_lbls.append(_t)
+    _a = FancyArrowPatch(
+        posA=(0, 0), posB=(0.1, 0.1),
+        arrowstyle='->', color=_STRATEGY_GREEN,
+        mutation_scale=10, lw=1.5,
+        animated=True, visible=False, zorder=6)
+    ax.add_patch(_a)
+    _art_strategy_arrows.append(_a)
 
 (_art_strategy_line,) = ax.plot([], [], color=_STRATEGY_GREEN, lw=1.5,
                                  zorder=5, animated=True)
@@ -479,16 +487,25 @@ def _redraw():
 
     # ── Strategy points ───────────────────────────────────────────────────────
     n = len(_strategy_points)
-    for i, (c, lbl) in enumerate(zip(_art_strategy_pts, _art_strategy_lbls)):
+    for i, (c, lbl, arrow) in enumerate(
+            zip(_art_strategy_pts, _art_strategy_lbls, _art_strategy_arrows)):
         if i < n:
-            px, py = _strategy_points[i]["x"], _strategy_points[i]["y"]
+            pt = _strategy_points[i]
+            px, py = pt["x"], pt["y"]
             c.set_center((px, py))
             c.set_visible(True)
             lbl.set_position((px, py))
             lbl.set_visible(True)
+            d = pt.get("dir")
+            if d is not None:
+                arrow.set_positions((px, py), (d["x"], d["y"]))
+                arrow.set_visible(True)
+            else:
+                arrow.set_visible(False)
         else:
             c.set_visible(False)
             lbl.set_visible(False)
+            arrow.set_visible(False)
     if n >= 1:
         pos = _robot_pos
         _art_strategy_line.set_data(
@@ -532,7 +549,7 @@ def _redraw():
     for artist in [
         _art_lidar,
         _art_self, *_art_bots, *_art_blbls,
-        _art_strategy_line, *_art_strategy_pts, *_art_strategy_lbls,
+        _art_strategy_line, *_art_strategy_pts, *_art_strategy_lbls, *_art_strategy_arrows,
         _art_arrow,
         _art_ball, _art_ball_hidden, _art_ball_hist, _art_ball_arrow,
         _art_sim_ball, _art_sim_self, *_art_sim_obs,

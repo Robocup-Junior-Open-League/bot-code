@@ -41,6 +41,7 @@ _perf = PerfMonitor("node_prod_sensor", broker=mb, print_every=500)
 
 # Shared: IMU thread writes, lidar sim reads via get_heading lambda
 _imu_pitch   = None
+_imu_offset  = None   # set to the first raw reading; subtracted so startup dir = 0
 _angle_dict  = {}
 _batch_count = 0
 
@@ -100,8 +101,12 @@ class _SimPitch:
 
 
 def _imu_loop(sensor_ref, sim):
-    """Continuously polls IMU and publishes imu_pitch. Runs in a daemon thread."""
-    global _imu_pitch
+    """Continuously polls IMU and publishes imu_pitch. Runs in a daemon thread.
+
+    The first valid reading is stored as _imu_offset so that the published
+    heading is always relative to the startup orientation (startup dir = 0).
+    """
+    global _imu_pitch, _imu_offset
     while True:
         if _hw_imu_available and sensor_ref[0] is None:
             sensor_ref[0] = _init_bno(sensor_ref[1], sensor_ref[2])
@@ -117,8 +122,19 @@ def _imu_loop(sensor_ref, sim):
                         time.sleep(IMU_POLL_RATE)
                         continue
                     pitch = round(_quaternion_to_pitch(*quat), 2)
-                _imu_pitch = pitch
-                mb.set("imu_pitch", str(pitch))
+
+                if _imu_offset is None:
+                    _imu_offset = pitch
+                    print(f"[SENSOR/IMU] Calibrated: startup offset = {pitch:.2f}°")
+
+                calibrated = pitch - _imu_offset
+                # Normalise to [-180, 180]
+                while calibrated >  180.0: calibrated -= 360.0
+                while calibrated < -180.0: calibrated += 360.0
+                calibrated = round(calibrated, 2)
+
+                _imu_pitch = calibrated
+                mb.set("imu_pitch", str(calibrated))
             time.sleep(IMU_POLL_RATE)
         except Exception as e:
             print(f"[SENSOR/IMU] {type(e).__name__}: {e} — reinitialising...")

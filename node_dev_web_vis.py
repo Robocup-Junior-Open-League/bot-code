@@ -473,6 +473,32 @@ function drawStatus(s) {
 }
 
 // ── Strategy points ───────────────────────────────────────────────────────────
+function drawStrategyArrow(x1, y1, x2, y2, color) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return;
+    const angle = Math.atan2(dy, dx);
+    const head = Math.max(8, Math.min(14, len * 0.18));
+    const spread = Math.PI / 6;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - head * Math.cos(angle - spread),
+               y2 - head * Math.sin(angle - spread));
+    ctx.lineTo(x2 - head * Math.cos(angle + spread),
+               y2 - head * Math.sin(angle + spread));
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+}
+
 function drawStrategyPoints(s) {
     const pts = s.strategy_points;
     if (!pts || pts.length === 0) return;
@@ -500,7 +526,14 @@ function drawStrategyPoints(s) {
         ctx.setLineDash([]);
         ctx.stroke();
     }
-    // Circles + index labels
+    // Dir arrows (dashed, from each point toward its target)
+    for (let i = 0; i < pts.length; i++) {
+        const pt = pts[i];
+        if (pt.dir) {
+            drawStrategyArrow(cx(pt.x), cy(pt.y), cx(pt.dir.x), cy(pt.dir.y), EDGE);
+        }
+    }
+    // Circles + index labels (drawn on top of arrows)
     ctx.font = 'bold 11px monospace';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     for (let i = 0; i < pts.length; i++) {
@@ -511,6 +544,7 @@ function drawStrategyPoints(s) {
         ctx.fill();
         ctx.strokeStyle = EDGE;
         ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
         ctx.stroke();
         ctx.fillStyle = 'black';
         ctx.fillText(String(i), pcx, pcy);
