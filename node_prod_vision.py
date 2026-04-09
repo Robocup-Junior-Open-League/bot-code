@@ -139,8 +139,8 @@ def _process_frame(frame):
 
 class _SimBall:
     """Der geniale Digital Twin von eurem Projekt."""
-    FIELD_W  = 1.82
-    FIELD_H  = 2.43
+    FIELD_W  = 1.58
+    FIELD_H  = 2.19
     BALL_R   = BALL_RADIUS_MM / 1000.0
     MARGIN   = BALL_R + 0.02
     SPEED    = 0.6
@@ -300,8 +300,8 @@ if __name__ == "__main__":
     if _ap.parse_args().no_output:
         sys.stdout = open(os.devnull, "w")
 
-    if not _hw_available:
-        raise SystemExit("[VISION] Cannot start: OpenCV is not installed.")
+    # if not _hw_available:
+    #     raise SystemExit("[VISION] Cannot start: OpenCV is not installed.")
 
     try:
         val = mb.get("robot_position")
